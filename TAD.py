@@ -4,3 +4,10 @@ for i in list:
 		print(f"{i} is an even number")
 	else:
 		print(f"{i} is an odd number")
+
+i = 1
+j = 10
+while i != j:
+	print(i)
+	j += 1
+
