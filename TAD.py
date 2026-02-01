@@ -42,7 +42,7 @@ def next_node(current_node):
 	return random.choice(top_choices)[0]
 
 
-def final_route():
+def truck_only_route() -> list[int]:
 	current_node = 0
 	while len(search_queue) > 0:
 		chosen = next_node(current_node)
@@ -55,6 +55,75 @@ def final_route():
 	return truck_route
 
 
-print(final_route())
+#Define two dictionaries for the launching and landing
+drone_launching = {1: [], 2: []}
+drone_landing = {1: [], 2: []}
+
+def map_launching_and_landing(prev_node, next_node, drone_number):
+	drone_launching[drone_number].append(prev_node)
+	drone_landing[drone_number].append(next_node)
+	return drone_launching, drone_landing
+
+
+def drone_route() -> list[int]:
+	truck = truck_only_route()
+	drone1 = []
+	drone2 = []
+	prob_first_node = 0.3
+	prob_second_node = 0.2
+	drone_flight_limit = 5500
+	i = 1
+	while i < len(truck_route) - 1:
+		prev_node = truck_route[i - 1]
+		curr_node = truck_route[i]
+		next_node = truck_route[i + 1]
+		drone1_bool = False
+		prev_distance = D[prev_node][curr_node]
+		next_distance = D[curr_node][next_node]
+		# Simple check: total flight for outbound+return must fit limit
+		if prev_distance + next_distance <= drone_flight_limit:
+			if random.random() < prob_first_node:
+				drone1_bool = True
+				drone1.append(i)
+				drone_launch, drone_land = map_launching_and_landing(prev_node, next_node, 1)
+				i += 1
+				truck.remove(i)
+			#This is for drone 2
+			if random.random() < prob_first_node and drone1_bool == False:
+				drone2.append(i)
+				drone_launch, drone_land = map_launching_and_landing(prev_node, next_node, 2)
+				i += 1
+				truck.remove(i)
+		if i >= 2 and random.random() < prob_second_node:
+			prev_node = truck_route[i - 2]
+			prev_distance = D[prev_node][curr_node]
+			next_distance = D[curr_node][next_node]
+			if prev_distance + next_distance <= drone_flight_limit:
+				if random.random() < prob_first_node:
+					drone1_bool = True
+					drone1.append(i)
+					drone_launch, drone_land = map_launching_and_landing(prev_node, next_node, 1)
+					i += 1
+					truck.remove(i)
+				if random.random() < prob_first_node and drone1_bool == False:
+					drone2.append(i)
+					i += 1
+					drone_launch, drone_land = map_launching_and_landing(prev_node, next_node, 2)
+					truck.remove(i)	
+				
+		i += 1
+	return truck, drone1, drone2, drone_launch, drone_land
+		
+
+truck, drone1, drone2, drone_launch, drone_land = drone_route()
+print(f"Truck route is: {truck}")
+print(f"Drone1 visits: {drone1}")
+print(f"Drone2 visits: {drone2}")
+print(f"launching sites: {drone_launch}")
+print(f"launching sites: {drone_land}")
+
+def full_format_solution():
+	print(f"{truck}|{drone1}-1{drone2}|{drone_launch[1]}-1{drone_launch[2]}|{drone_land[1]}-1{drone_land[2]}")
+
 
 
