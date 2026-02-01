@@ -39,25 +39,32 @@ def next_node(current_node):
 			three_nearest.append((index, distance))
 			three_nearest.sort(key=lambda x: x[1])
 			three_nearest.pop()
-	random_index = random.randint(0, len(three_nearest) - 1)
-	return three_nearest[random_index][0]
+	print(three_nearest)
+	return three_nearest
 
 def final_route():
 	current_node = 0
 	while search_queue:
-		chosen = next_node(current_node)
-		if chosen is None:
+		neighbors = next_node(current_node)
+		if not neighbors:
 			break
+		random_index = random.randint(0, len(neighbors) - 1)
+		chosen = neighbors[random_index][0]
 		truck_route.append(chosen)
 		search_queue.remove(chosen)
 		current_node = chosen
 	truck_route.append(0)
+
+	#Run the local search to add and remove one branch
+	hub_nearest = next_node(0)
+	print(hub_nearest)
 	return truck_route
 
 print(final_route())
 
-        
 
+
+        
 
 
 
