@@ -17,6 +17,7 @@ three_nearest = []
 def next_node(current_node):
 	relevant_row = D[current_node]
 	three_nearest = []
+	hub_nearest = None
 	target_size = min(3, len(search_queue))
 	i = 0
 	# collect the first `target_size` available neighbors
@@ -39,25 +40,27 @@ def next_node(current_node):
 			three_nearest.append((index, distance))
 			three_nearest.sort(key=lambda x: x[1])
 			three_nearest.pop()
-	print(three_nearest)
-	return three_nearest
+
+	random_index = random.randint(0, len(three_nearest) - 1)
+	next_node_num = three_nearest[random_index][0]
+	if current_node == 0 and len(three_nearest) == 3:
+		hub_nearest = [x for x in three_nearest if x[0] != next_node_num]
+	return next_node_num, hub_nearest
 
 def final_route():
 	current_node = 0
+	hub_nearest = None
 	while search_queue:
-		neighbors = next_node(current_node)
-		if not neighbors:
+		chosen, hub_nearest = next_node(current_node)
+		if chosen is None:
 			break
-		random_index = random.randint(0, len(neighbors) - 1)
-		chosen = neighbors[random_index][0]
 		truck_route.append(chosen)
 		search_queue.remove(chosen)
 		current_node = chosen
 	truck_route.append(0)
 
 	#Run the local search to add and remove one branch
-	hub_nearest = next_node(0)
-	print(hub_nearest)
+	
 	return truck_route
 
 print(final_route())
