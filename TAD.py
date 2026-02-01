@@ -16,24 +16,16 @@ search_queue = [i for i in range(1, NUM_NODES)]
 
 def next_node(current_node):
 	relevant_row = T[current_node]
-	hub_row = T[0]
 
-	# Weight between current-node distance and hub distance; closer to hub when few nodes remain.
-	remaining = len(search_queue)
-	total = NUM_NODES - 1
-	frac = remaining / total if total else 1
-	alpha = 0.7 + 0.2 * frac
-
-	target_size = min(3, len(search_queue))
+	# pure nearest-neighbor with random tie-break among the 3 closest unseen nodes
+	target_size = 1
 	candidates = []
 
 	for index in search_queue:
 		if index == current_node:
 			continue
 		distance = relevant_row[index]
-		hub_distance = hub_row[index]
-		score = alpha * distance + (1 - alpha) * hub_distance
-		candidates.append((index, score))
+		candidates.append((index, distance))
 
 	if not candidates:
 		return None
@@ -75,7 +67,8 @@ def drone_route() -> list[int]:
 	truck = truck_only_route()
 	drone1 = []
 	drone2 = []
-	prob_first_node = 0.5
+	prob_first_node = 0.9
+	prob_second_node = 0.5
 	drone_flight_limit = 5500
 	i = 1
 	drone_busy = {"drone1": False, "drone2": False}
@@ -113,7 +106,7 @@ def drone_route() -> list[int]:
 					truck.pop(i)
 					continue
 			if drone_busy["drone2"] is False:
-				if random.random() < prob_first_node:
+				if random.random() < prob_second_node:
 					drone_busy["drone2"] = True
 					drone2.append(curr_node)
 					drone_launch, drone_land = map_launching_and_landing(prev_node, next_node, 2, drone_launch, drone_land)
