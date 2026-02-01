@@ -34,16 +34,33 @@ calc.drone_times = drone_times
 calc.flight_range = flight_range
 calc.depot_index = 0  # depot is node 0 in your routes
 
-truck_route = final_route()
+truck, drone1, drone2, drone_launch, drone_land = drone_route()
+launch_indices_1 = [truck.index(node) + 1 for node in drone_launch[1]]
+landing_indices_1 = [truck.index(node) + 1 for node in drone_land[1]]
+launch_indices_2 = [truck.index(node) + 1 for node in drone_launch[2]]
+landing_indices_2 = [truck.index(node) + 1 for node in drone_land[2]]
+
+drone_serving = drone1 + [-1] + drone2
+drone_total_launches = launch_indices_1 + [-1] + launch_indices_2
+drone_total_landings = landing_indices_1 + [-1] + landing_indices_2
 
 solution = {
-    "part1": truck_route,
-    "part2": [-1],   # no drone customers yet
-    "part3": [-1],   # no launches
-    "part4": [-1],   # no landings
+    "part1": truck,
+    "part2": drone_serving,   # no drone customers yet
+    "part3": drone_total_launches,   # no launches
+    "part4": drone_total_landings,   # no landings
 }
 
 total_time, arrivals, departures, feasible = calc.calculate_total_waiting_time(solution)
 
 print("Total time:", total_time)
 print("Feasible:", feasible)
+
+if feasible!= True:
+    for i in drone_total_landings:
+        if i not in truck:
+            print(f"landing {i} is not in the truck")
+    for i in drone_total_launches:
+        if i not in truck:
+            print(f"landing {i} is not in the truck")
+    print(truck)
