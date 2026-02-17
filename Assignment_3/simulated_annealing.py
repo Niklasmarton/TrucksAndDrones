@@ -4,8 +4,9 @@ from pathlib import Path
 import sys
 import importlib.util
 import copy
-import time
 import random
+import math
+import time
 
 GENERAL_ALGORITHM_PATH = Path(__file__).resolve().parents[1] / "General_algorithm"
 if str(GENERAL_ALGORITHM_PATH) not in sys.path:
@@ -33,7 +34,6 @@ file_name = "R_10.txt"
 
 instance = read_instance(f"{absolute_path}{file_name}")
 
-# Unpack fields.
 T = instance["truck_times"]
 D = instance["drone_times"]
 flight_limit = instance["flight_limit"]
@@ -54,7 +54,7 @@ def to_parts_solution(solution):
     drone_serving_1 = [node for node, _, _ in drone1]
     drone_serving_2 = [node for node, _, _ in drone2]
 
-    # 1-based indices in part3/part4.
+    # Feasibility/evaluation modules use 1-based launch/landing cells.
     launch_indices_1 = [launch_idx + 1 for _, launch_idx, _ in drone1]
     landing_indices_1 = [land_idx + 1 for _, _, land_idx in drone1]
     launch_indices_2 = [launch_idx + 1 for _, launch_idx, _ in drone2]
@@ -86,19 +86,19 @@ def evaluate_solution(solution, calc, checker):
     return True, total_time
 
 
-def solution_key(solution):
-    truck, drone1, drone2 = solution
-    return (tuple(truck), tuple(drone1), tuple(drone2))
-
-
-def local_search(initial_solution, iterations=10000):
+def simulated_annealing(initial_solution, warmup_iterations=100, iterations=9900, final_temperature=0.1):
     """
-    Local search (1-reinsert neighborhood), following pseudocode:
-      BestSolution <- s0
-      for iter in 1..N:
-          NewSolution <- Operator(BestSolution)
-          if NewSolution feasible and f(NewSolution) < f(BestSolution):
-              BestSolution <- NewSolution
+    Simulated annealing per assignment pseudocode.
+
+    Warm-up phase (100 iters):
+      - collect DeltaE samples (feasible moves only)
+      - accept improving moves
+      - accept non-improving moves with probability 0.8
+
+    Main SA phase (9900 iters):
+      - accept improving moves
+      - accept worsening moves with probability exp(-DeltaE/T)
+      - cool with T <- alpha * T
     """
     calc = CalCulateTotalArrivalTime()
     calc.truck_times = T
@@ -116,29 +116,82 @@ def local_search(initial_solution, iterations=10000):
         flight_range=flight_limit,
     )
 
-    best_solution = copy.deepcopy(initial_solution)
-    _, best_cost = evaluate_solution(best_solution, calc, checker)
-    current_best_key = solution_key(best_solution)
-    seen_neighbors = set()
+    incumbent = copy.deepcopy(initial_solution)
+    incumbent_feasible, incumbent_cost = evaluate_solution(incumbent, calc, checker)
+    if not incumbent_feasible:
+        raise ValueError("Initial solution is not feasible.")
 
-    for _ in range(iterations):
-        new_solution = operator(best_solution)
-        new_key = solution_key(new_solution)
+    best_solution = copy.deepcopy(incumbent)
+    best_cost = incumbent_cost
 
-        # Skip repeated sampled move outcome from the same BestSolution.
-        if new_key in seen_neighbors:
-            continue
-        seen_neighbors.add(new_key)
+    deltas = []
 
+    # Warm-up phase: w = 1..100
+    for _ in range(warmup_iterations):
+        new_solution = operator(incumbent)
         feasible, new_cost = evaluate_solution(new_solution, calc, checker)
+        if not feasible:
+            continue
 
-        if feasible and new_cost < best_cost:
-            best_solution = new_solution
-            best_cost = new_cost
-            new_best_key = solution_key(best_solution)
-            if new_best_key != current_best_key:
-                current_best_key = new_best_key
-                seen_neighbors = set()
+        delta_e = new_cost - incumbent_cost
+        deltas.append(delta_e)
+
+        if delta_e < 0:
+            incumbent = new_solution
+            incumbent_cost = new_cost
+            if incumbent_cost < best_cost:
+                best_solution = copy.deepcopy(incumbent)
+                best_cost = incumbent_cost
+        else:
+            if random.random() < 0.8:
+                incumbent = new_solution
+                incumbent_cost = new_cost
+
+    # Compute T0 and alpha from pseudocode.
+    if deltas:
+        delta_avg = sum(deltas) / len(deltas)
+    else:
+        delta_avg = 1.0
+
+    # T0 = -DeltaAvg / ln(0.8)
+    t0 = -delta_avg / math.log(0.8)
+    # Guard for degenerate/non-positive temperature from unusual delta samples.
+    if t0 <= 0:
+        t0 = 1.0
+
+    # alpha = (Tf / T0)^(1/iterations)
+    if iterations > 0:
+        alpha = (final_temperature / t0) ** (1.0 / iterations)
+    else:
+        alpha = 1.0
+
+    temperature = t0
+
+    # Main SA phase: iteration = 1..9900
+    for _ in range(iterations):
+        new_solution = operator(incumbent)
+        feasible, new_cost = evaluate_solution(new_solution, calc, checker)
+        if feasible:
+            delta_e = new_cost - incumbent_cost
+
+            if delta_e < 0:
+                incumbent = new_solution
+                incumbent_cost = new_cost
+                if incumbent_cost < best_cost:
+                    best_solution = copy.deepcopy(incumbent)
+                    best_cost = incumbent_cost
+            else:
+                # p = exp(-DeltaE / T)
+                if temperature > 0:
+                    p_accept = math.exp(-delta_e / temperature)
+                else:
+                    p_accept = 0.0
+
+                if random.random() < p_accept:
+                    incumbent = new_solution
+                    incumbent_cost = new_cost
+
+        temperature = alpha * temperature
 
     # Safety: never return an infeasible best.
     best_parts = to_parts_solution(best_solution)
@@ -148,7 +201,7 @@ def local_search(initial_solution, iterations=10000):
     return best_solution, best_cost
 
 
-def run_statistics(initial_solution, runs=10, iterations=10000):
+def run_statistics(initial_solution, runs=10, warmup_iterations=100, iterations=9900, final_temperature=0.1):
     calc = CalCulateTotalArrivalTime()
     calc.truck_times = T
     calc.drone_times = D
@@ -175,7 +228,12 @@ def run_statistics(initial_solution, runs=10, iterations=10000):
     for run_id in range(runs):
         random.seed(run_id)
         start = time.perf_counter()
-        best_solution, best_cost = local_search(copy.deepcopy(initial_solution), iterations=iterations)
+        best_solution, best_cost = simulated_annealing(
+            copy.deepcopy(initial_solution),
+            warmup_iterations=warmup_iterations,
+            iterations=iterations,
+            final_temperature=final_temperature,
+        )
         elapsed = time.perf_counter() - start
 
         run_costs.append(best_cost)
@@ -199,7 +257,7 @@ def run_statistics(initial_solution, runs=10, iterations=10000):
         f"({improvement_pct:.2f}% reduction)"
     )
     print(
-        f"Average runtime per iteration (1 iteration = {iterations} local-search loops): "
+        f"Average runtime per iteration (1 iteration = SA run with {warmup_iterations + iterations} loops): "
         f"{avg_runtime_per_run:.4f} seconds"
     )
 
@@ -207,7 +265,7 @@ def run_statistics(initial_solution, runs=10, iterations=10000):
 
 
 def format_solution_pipe(solution):
-    # Display format uses internal (0-based) launch/landing indices to match tuple representation.
+    # Display format uses internal (0-based) launch/landing indices.
     truck, drone1, drone2 = solution
     drone_serving_1 = [node for node, _, _ in drone1]
     drone_serving_2 = [node for node, _, _ in drone2]
@@ -220,12 +278,21 @@ def format_solution_pipe(solution):
     part2 = ",".join(str(x) for x in (drone_serving_1 + [-1] + drone_serving_2))
     part3 = ",".join(str(x) for x in (launch_indices_1 + [-1] + launch_indices_2))
     part4 = ",".join(str(x) for x in (landing_indices_1 + [-1] + landing_indices_2))
-    return (
-        f"{part1} | "
-        f"{part2} | "
-        f"{part3} | "
-        f"{part4}"
-    )
+    return f"{part1} | {part2} | {part3} | {part4}"
+
+
+def format_solution_pipe_checker(solution):
+    """
+    Checker-compatible display format:
+    - drone served nodes unchanged
+    - launch/landing cells shown as 1-based indices
+    """
+    parts = to_parts_solution(solution)
+    part1 = ",".join(str(x) for x in parts["part1"])
+    part2 = ",".join(str(x) for x in parts["part2"])
+    part3 = ",".join(str(x) for x in parts["part3"])
+    part4 = ",".join(str(x) for x in parts["part4"])
+    return f"{part1} | {part2} | {part3} | {part4}"
 
 
 if __name__ == "__main__":
@@ -235,6 +302,14 @@ if __name__ == "__main__":
     initial_solution = [truck_route, drone1, drone2]
 
     print(f"Old solution was: {initial_solution}")
-    best_solution, best_cost = run_statistics(initial_solution, runs=10, iterations=10000)
+
+    best_solution, best_cost = run_statistics(
+        initial_solution,
+        runs=10,
+        warmup_iterations=100,
+        iterations=9900,
+        final_temperature=0.1,
+    )
     print(f"Best solution after all runs: {best_solution}")
-    print(f"Best solution (pipe format): {format_solution_pipe(best_solution)}")
+    print(f"Best solution (pipe format, internal 0-based): {format_solution_pipe(best_solution)}")
+    print(f"Best solution (pipe format, checker 1-based): {format_solution_pipe_checker(best_solution)}")
