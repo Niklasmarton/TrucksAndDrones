@@ -1,5 +1,5 @@
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
-from TAD import *
+from Construction import *
 import numpy as np
 
 INSTANCE_FILE = "Truck_Drone_Contest.txt"

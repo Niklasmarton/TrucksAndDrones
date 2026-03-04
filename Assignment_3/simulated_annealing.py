@@ -30,7 +30,7 @@ except ModuleNotFoundError:
     SolutionFeasibility = feas_mod.SolutionFeasibility
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
-file_name = "R_10.txt"
+file_name = "R_20.txt"
 
 instance = read_instance(f"{absolute_path}{file_name}")
 
@@ -86,6 +86,61 @@ def evaluate_solution(solution, calc, checker):
     return True, total_time
 
 
+def solution_key(solution):
+    truck, drone1, drone2 = solution
+    return (tuple(truck), tuple(drone1), tuple(drone2))
+
+
+def fast_precheck_solution(solution):
+    """
+    Cheap structural/range filter to skip obviously invalid candidates before
+    full feasibility + objective evaluation.
+    """
+    truck, drone1, drone2 = solution
+    truck_len = len(truck)
+    if truck_len < 2 or truck[0] != depot or truck[-1] != depot:
+        return False
+
+    truck_customers = [node for node in truck if node != depot]
+    if len(truck_customers) != len(set(truck_customers)):
+        return False
+
+    drone_nodes = []
+    for route in (drone1, drone2):
+        prev_land = 0
+        used_launch = set()
+        used_land = set()
+        for node, launch_idx, land_idx in route:
+            if node == depot:
+                return False
+            if not (0 <= launch_idx < land_idx < truck_len):
+                return False
+            if launch_idx in used_launch or land_idx in used_land:
+                return False
+            if launch_idx < prev_land:
+                return False
+
+            launch_node = truck[launch_idx]
+            land_node = truck[land_idx]
+            if D[launch_node][node] + D[node][land_node] > flight_limit:
+                return False
+
+            used_launch.add(launch_idx)
+            used_land.add(land_idx)
+            prev_land = land_idx
+            drone_nodes.append(node)
+
+    if len(drone_nodes) != len(set(drone_nodes)):
+        return False
+
+    all_served = truck_customers + drone_nodes
+    if len(all_served) != n_customers:
+        return False
+    if len(set(all_served)) != n_customers:
+        return False
+    return True
+
+
 def simulated_annealing(initial_solution, warmup_iterations=100, iterations=9900, final_temperature=0.1):
     """
     Simulated annealing per assignment pseudocode.
@@ -116,8 +171,18 @@ def simulated_annealing(initial_solution, warmup_iterations=100, iterations=9900
         flight_range=flight_limit,
     )
 
+    eval_cache = {}
+
+    def cached_evaluate(sol):
+        key = solution_key(sol)
+        if key in eval_cache:
+            return eval_cache[key]
+        result = evaluate_solution(sol, calc, checker)
+        eval_cache[key] = result
+        return result
+
     incumbent = copy.deepcopy(initial_solution)
-    incumbent_feasible, incumbent_cost = evaluate_solution(incumbent, calc, checker)
+    incumbent_feasible, incumbent_cost = cached_evaluate(incumbent)
     if not incumbent_feasible:
         raise ValueError("Initial solution is not feasible.")
 
@@ -129,7 +194,9 @@ def simulated_annealing(initial_solution, warmup_iterations=100, iterations=9900
     # Warm-up phase: w = 1..100
     for _ in range(warmup_iterations):
         new_solution = operator(incumbent)
-        feasible, new_cost = evaluate_solution(new_solution, calc, checker)
+        if not fast_precheck_solution(new_solution):
+            continue
+        feasible, new_cost = cached_evaluate(new_solution)
         if not feasible:
             continue
 
@@ -170,7 +237,9 @@ def simulated_annealing(initial_solution, warmup_iterations=100, iterations=9900
     # Main SA phase: iteration = 1..9900
     for _ in range(iterations):
         new_solution = operator(incumbent)
-        feasible, new_cost = evaluate_solution(new_solution, calc, checker)
+        if not fast_precheck_solution(new_solution):
+            continue
+        feasible, new_cost = cached_evaluate(new_solution)
         if feasible:
             delta_e = new_cost - incumbent_cost
 
@@ -226,7 +295,6 @@ def run_statistics(initial_solution, runs=10, warmup_iterations=100, iterations=
     global_best_cost = float("inf")
 
     for run_id in range(runs):
-        random.seed(run_id)
         start = time.perf_counter()
         best_solution, best_cost = simulated_annealing(
             copy.deepcopy(initial_solution),
@@ -238,6 +306,8 @@ def run_statistics(initial_solution, runs=10, warmup_iterations=100, iterations=
 
         run_costs.append(best_cost)
         run_times.append(elapsed)
+
+        print(f"Run {run_id + 1}/{runs} best objective: {best_cost}")
 
         if best_cost < global_best_cost:
             global_best_cost = best_cost
@@ -265,28 +335,7 @@ def run_statistics(initial_solution, runs=10, warmup_iterations=100, iterations=
 
 
 def format_solution_pipe(solution):
-    # Display format uses internal (0-based) launch/landing indices.
-    truck, drone1, drone2 = solution
-    drone_serving_1 = [node for node, _, _ in drone1]
-    drone_serving_2 = [node for node, _, _ in drone2]
-    launch_indices_1 = [launch_idx for _, launch_idx, _ in drone1]
-    launch_indices_2 = [launch_idx for _, launch_idx, _ in drone2]
-    landing_indices_1 = [land_idx for _, _, land_idx in drone1]
-    landing_indices_2 = [land_idx for _, _, land_idx in drone2]
-
-    part1 = ",".join(str(x) for x in truck)
-    part2 = ",".join(str(x) for x in (drone_serving_1 + [-1] + drone_serving_2))
-    part3 = ",".join(str(x) for x in (launch_indices_1 + [-1] + launch_indices_2))
-    part4 = ",".join(str(x) for x in (landing_indices_1 + [-1] + landing_indices_2))
-    return f"{part1} | {part2} | {part3} | {part4}"
-
-
-def format_solution_pipe_checker(solution):
-    """
-    Checker-compatible display format:
-    - drone served nodes unchanged
-    - launch/landing cells shown as 1-based indices
-    """
+    # Checker-compatible display format (1-based launch/landing cells).
     parts = to_parts_solution(solution)
     part1 = ",".join(str(x) for x in parts["part1"])
     part2 = ",".join(str(x) for x in parts["part2"])
@@ -301,7 +350,6 @@ if __name__ == "__main__":
     drone2 = []
     initial_solution = [truck_route, drone1, drone2]
 
-    print(f"Old solution was: {initial_solution}")
 
     best_solution, best_cost = run_statistics(
         initial_solution,
@@ -311,5 +359,4 @@ if __name__ == "__main__":
         final_temperature=0.1,
     )
     print(f"Best solution after all runs: {best_solution}")
-    print(f"Best solution (pipe format, internal 0-based): {format_solution_pipe(best_solution)}")
-    print(f"Best solution (pipe format, checker 1-based): {format_solution_pipe_checker(best_solution)}")
+    print(f"Best solution (pipe format, checker 1-based): {format_solution_pipe(best_solution)}")
