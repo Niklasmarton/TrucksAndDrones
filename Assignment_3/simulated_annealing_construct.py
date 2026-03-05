@@ -22,7 +22,7 @@ except Exception:
 
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
-file_name = "R_100.txt"
+file_name = "F_10.txt"
 
 
 def _configure_sa_instance(instance):

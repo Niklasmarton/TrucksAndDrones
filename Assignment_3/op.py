@@ -1,5 +1,6 @@
 import random
 
+
 # Operator context must be set by the algorithm that uses the operator
 # (e.g., local_search.py / simulated_annealing.py).
 T = None

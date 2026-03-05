@@ -30,7 +30,7 @@ except ModuleNotFoundError:
     SolutionFeasibility = feas_mod.SolutionFeasibility
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
-file_name = "R_20.txt"
+file_name = "F_10.txt"
 
 instance = read_instance(f"{absolute_path}{file_name}")
 
