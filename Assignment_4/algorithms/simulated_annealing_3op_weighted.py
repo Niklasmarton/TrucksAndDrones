@@ -14,15 +14,15 @@ for p in (IO_DIR, OPS_DIR, CORE_DIR):
         sys.path.append(str(p))
 
 from read_file import read_instance
-import op1_truck_reinsert as op1
-import op2_reinsert as op2
-import op3_truck2opt as op3
+import op1_reinsert as op1
+import op2_truck2opt as op2
+import op3_truck_drone_swap as op3
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
 from drone_route_utils import build_drone_pair
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
-file_name = "F_100.txt"
+file_name = "R_100.txt"
 
 
 def clone_solution(solution):
@@ -82,8 +82,8 @@ def build_evaluator(instance_data):
 
 
 def reset_operator_state():
-    if hasattr(op2, "reset_operator_state"):
-        op2.reset_operator_state()
+    if hasattr(op1, "reset_operator_state"):
+        op1.reset_operator_state()
 
 
 def to_parts_solution(solution):
@@ -404,8 +404,10 @@ def _normalize_operator_weights(operator_weights):
         w3 = float(operator_weights.get("op3", 0.0))
     else:
         if len(operator_weights) != 3:
-            raise ValueError("operator_weights must contain exactly 3 values: [w1, w2, w3]")
-        w1, w2, w3 = (float(operator_weights[0]), float(operator_weights[1]), float(operator_weights[2]))
+            raise ValueError("operator_weights must contain 3 values: [w1, w2, w3]")
+        w1 = float(operator_weights[0])
+        w2 = float(operator_weights[1])
+        w3 = float(operator_weights[2])
 
     if w1 < 0 or w2 < 0 or w3 < 0:
         raise ValueError("operator weights must be non-negative")
@@ -419,7 +421,7 @@ def _normalize_operator_weights(operator_weights):
 
 def apply_weighted_operator(solution, operator_weights=None):
     """
-    Weighted operator selection. Default is equal weights (1/3 each).
+    Weighted operator selection for 3 operators.
     """
     if (
         isinstance(operator_weights, tuple)
@@ -431,10 +433,10 @@ def apply_weighted_operator(solution, operator_weights=None):
         w1, w2, w3 = _normalize_operator_weights(operator_weights)
     r = random.random()
     if r < w1:
-        return op1.truck_reinsert(solution), "op1_used"
+        return op1.operator(solution), "op1_used"
     if r < (w1 + w2):
-        return op2.operator(solution), "op2_used"
-    return op3.truck_2opt(solution), "op3_used"
+        return op2.truck_2opt(solution), "op2_used"
+    return op3.operator(solution), "op3_used"
 
 
 def simulated_annealing(
@@ -566,6 +568,7 @@ def run_statistics(
     plot_best_after_all=True,
     operator_weights=None,
     verbose=True,
+    return_metrics=False,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -614,6 +617,14 @@ def run_statistics(
     improvement_abs = init_cost - best_obj
     improvement_pct = (improvement_abs / init_cost * 100.0) if init_cost > 0 else 0.0
     avg_runtime_per_run = sum(run_times) / len(run_times)
+    metrics = {
+        "initial_score": init_cost,
+        "average_score": avg_obj,
+        "best_score": best_obj,
+        "improvement_abs": improvement_abs,
+        "improvement_pct": improvement_pct,
+        "average_runtime": avg_runtime_per_run,
+    }
 
     if verbose:
         print(f"Average score: {avg_obj}")
@@ -634,6 +645,8 @@ def run_statistics(
             title=f"Best Solution After {runs} Runs (score: {global_best_cost})",
         )
 
+    if return_metrics:
+        return global_best_solution, global_best_cost, metrics
     return global_best_solution, global_best_cost
 
 
@@ -651,21 +664,38 @@ def main():
     n_customers = instance_data["n_customers"]
     truck_route = [i for i in range(n_customers + 1)] + [0]
     initial_solution = [truck_route, [], []]
+    configs = [
+        ("Balanced", {"op1": 0.40, "op2": 0.30, "op3": 0.30}),
+        ("Truck-Heavy", {"op1": 0.30, "op2": 0.45, "op3": 0.25}),
+        ("2opt-heavy", {"op1": 0.10, "op2": 0.40, "op3": 0.50}),
+    ]
 
-    operator_weights = {"op1": 0.25, "op2": 0.35, "op3": 0.4}
+    summary = []
+    for name, weights in configs:
+        print(f"\n=== {name} ===")
+        best_solution, best_cost, metrics = run_statistics(
+            clone_solution(initial_solution),
+            instance_data=instance_data,
+            runs=10,
+            warmup_iterations=100,
+            iterations=9900,
+            final_temperature=0.1,
+            cache_limit=200000,
+            plot_best_after_all=False,
+            operator_weights=weights,
+            verbose=True,
+            return_metrics=True,
+        )
+        summary.append((name, metrics["average_score"], best_cost, best_solution))
 
-    best_solution, best_cost = run_statistics(
-        initial_solution,
-        instance_data=instance_data,
-        runs=10,
-        warmup_iterations=100,
-        iterations=9900,
-        final_temperature=0.1,
-        cache_limit=200000,
-        plot_best_after_all=False,
-        operator_weights=operator_weights,
-        verbose=True,
-    )
+    print("\n=== Comparison (lower is better) ===")
+    for name, avg_score, best_cost, _ in summary:
+        print(f"{name}: average={avg_score}, best={best_cost}")
+
+    best_name, _, _, best_solution = min(summary, key=lambda x: x[2])
+    print(f"Best configuration: {best_name}")
+    print("Best solution (pipe format):")
+    print(format_solution_pipe(best_solution))
 
 
 if __name__ == "__main__":

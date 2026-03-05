@@ -16,9 +16,9 @@ for p in (IO_DIR, OPS_DIR, CORE_DIR):
         sys.path.append(str(p))
 
 from read_file import read_instance
-import op1_truck_reinsert as op1
-import op2_reinsert as op2
-import op3_truck2opt as op3
+import op1_reinsert as op1
+import op2_truck2opt as op2
+import op3_truck_drone_swap as op3
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
 
@@ -29,7 +29,7 @@ except Exception:
 
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
-file_name = "F_50.txt"
+file_name = "F_100.txt"
 
 
 def load_instance(instance_path=None):
@@ -60,8 +60,8 @@ def configure_operator_context(instance_data):
 
 
 def reset_operator_state():
-    if hasattr(op2, "reset_operator_state"):
-        op2.reset_operator_state()
+    if hasattr(op1, "reset_operator_state"):
+        op1.reset_operator_state()
 
 
 def to_parts_solution(solution):
@@ -243,10 +243,10 @@ def apply_weighted_operator(solution):
     """
     r = random.random()
     if r < (1.0 / 3.0):
-        return op1.truck_reinsert(solution), "op1_used"
+        return op1.operator(solution), "op1_used"
     if r < (2.0 / 3.0):
-        return op2.operator(solution), "op2_used"
-    return op3.truck_2opt(solution), "op3_used"
+        return op2.truck_2opt(solution), "op2_used"
+    return op3.operator(solution), "op3_used"
 
 
 def simulated_annealing(
