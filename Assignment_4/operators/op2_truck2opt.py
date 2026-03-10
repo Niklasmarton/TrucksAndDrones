@@ -25,9 +25,10 @@ def _edge_check_budget(truck_len):
 
 def _choose_2opt_indices(truck_route):
     """
-    Choose (i, j) using first-improvement 2-opt:
+    Choose (i, j) using best-improvement 2-opt within a fixed edge-check budget:
     - candidate order is pseudo-randomized (random start offsets)
-    - return immediately on first improving move (delta < 0)
+    - tracks best improving move seen across entire budget
+    - returns best move found (or None if no improvement exists)
     Keeps depot fixed at both ends.
     """
     T, _, _, _ = get_operator_context()
@@ -41,6 +42,8 @@ def _choose_2opt_indices(truck_route):
 
     checks = 0
     max_checks = _edge_check_budget(n)
+    best_delta = 0.0
+    best_move = None
 
     i_start = random.randint(1, n - 3)
     for i_step in range(i_count):
@@ -55,16 +58,17 @@ def _choose_2opt_indices(truck_route):
         j_start = j_min + random.randint(0, j_count - 1)
         for j_step in range(j_count):
             if checks >= max_checks:
-                return None
+                return best_move
             j = j_min + ((j_start - j_min + j_step) % j_count)
             c = truck_route[j]
             d = truck_route[j + 1]
             delta = T[a][c] + T[b][d] - T[a][b] - T[c][d]
             checks += 1
-            if delta < 0:
-                return i, j
+            if delta < best_delta:
+                best_delta = delta
+                best_move = (i, j)
 
-    return None
+    return best_move
 
 
 def truck_2opt(solution):

@@ -114,6 +114,16 @@ def _choose_truck_removal_index(truck):
     if random.random() < _EXPLORE_PROB:
         return random.choice(candidates[: min(len(candidates), 8)])
 
+    # Rank-weighted random over top-k: rank 1 gets weight 1, rank 2 gets 1/2, etc.
+    # Strongly biases toward the best node while still visiting lower-ranked nodes.
+    k = min(_TOP_K_TRUCK_REMOVALS, len(candidates))
+    weights = [1.0 / (i + 1) for i in range(k)]
+    total = sum(weights)
+    r = random.random() * total
+    for i, w in enumerate(weights):
+        r -= w
+        if r <= 0:
+            return candidates[i]
     return candidates[0]
 
 
@@ -435,6 +445,6 @@ def operator(current_solution):
         return current_solution
 
     candidates.sort(key=lambda x: x[0])
-    if random.random() < _EXPLORE_PROB:
+    if random.random() < 0.25:
         return random.choice(candidates[: min(3, len(candidates))])[1]
     return candidates[0][1]

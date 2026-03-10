@@ -475,9 +475,30 @@ def simulated_annealing(
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
     stats = {
-        "op1": {"used": 0, "feasible": 0, "accepted": 0, "improved": 0, "delta_sum": 0.0},
-        "op2": {"used": 0, "feasible": 0, "accepted": 0, "improved": 0, "delta_sum": 0.0},
-        "op3": {"used": 0, "feasible": 0, "accepted": 0, "improved": 0, "delta_sum": 0.0},
+        "op1": {
+            "used": 0,
+            "feasible": 0,
+            "accepted": 0,
+            "improved": 0,
+            "delta_sum": 0.0,
+            "improve_delta_sum": 0.0,
+        },
+        "op2": {
+            "used": 0,
+            "feasible": 0,
+            "accepted": 0,
+            "improved": 0,
+            "delta_sum": 0.0,
+            "improve_delta_sum": 0.0,
+        },
+        "op3": {
+            "used": 0,
+            "feasible": 0,
+            "accepted": 0,
+            "improved": 0,
+            "delta_sum": 0.0,
+            "improve_delta_sum": 0.0,
+        },
     }
 
     def cached_evaluate(sol):
@@ -524,6 +545,7 @@ def simulated_annealing(
             stats[op_name]["accepted"] += 1
             stats[op_name]["improved"] += 1
             stats[op_name]["delta_sum"] += delta_e
+            stats[op_name]["improve_delta_sum"] += -delta_e
             if incumbent_cost < best_cost:
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
@@ -560,6 +582,7 @@ def simulated_annealing(
                 stats[op_name]["accepted"] += 1
                 stats[op_name]["improved"] += 1
                 stats[op_name]["delta_sum"] += delta_e
+                stats[op_name]["improve_delta_sum"] += -delta_e
                 if incumbent_cost < best_cost:
                     best_solution = clone_solution(incumbent)
                     best_cost = incumbent_cost
@@ -610,9 +633,30 @@ def run_statistics(
     global_best_cost = float("inf")
     shared_eval_cache = OrderedDict()
     aggregate_stats = {
-        "op1": {"used": 0, "feasible": 0, "accepted": 0, "improved": 0, "delta_sum": 0.0},
-        "op2": {"used": 0, "feasible": 0, "accepted": 0, "improved": 0, "delta_sum": 0.0},
-        "op3": {"used": 0, "feasible": 0, "accepted": 0, "improved": 0, "delta_sum": 0.0},
+        "op1": {
+            "used": 0,
+            "feasible": 0,
+            "accepted": 0,
+            "improved": 0,
+            "delta_sum": 0.0,
+            "improve_delta_sum": 0.0,
+        },
+        "op2": {
+            "used": 0,
+            "feasible": 0,
+            "accepted": 0,
+            "improved": 0,
+            "delta_sum": 0.0,
+            "improve_delta_sum": 0.0,
+        },
+        "op3": {
+            "used": 0,
+            "feasible": 0,
+            "accepted": 0,
+            "improved": 0,
+            "delta_sum": 0.0,
+            "improve_delta_sum": 0.0,
+        },
     }
 
     for run_id in range(runs):
@@ -638,6 +682,7 @@ def run_statistics(
             aggregate_stats[op_name]["accepted"] += op_stats[op_name]["accepted"]
             aggregate_stats[op_name]["improved"] += op_stats[op_name]["improved"]
             aggregate_stats[op_name]["delta_sum"] += op_stats[op_name]["delta_sum"]
+            aggregate_stats[op_name]["improve_delta_sum"] += op_stats[op_name]["improve_delta_sum"]
 
         run_costs.append(best_cost)
         run_times.append(elapsed)
@@ -686,10 +731,15 @@ def run_statistics(
             feasible_rate = (feasible_moves / used * 100.0) if used > 0 else 0.0
             accept_rate = (accepted / feasible_moves * 100.0) if feasible_moves > 0 else 0.0
             improve_rate = (improved / accepted * 100.0) if accepted > 0 else 0.0
+            improve_per_1k_uses = (
+                aggregate_stats[op_name]["improve_delta_sum"] * 1000.0 / used
+                if used > 0
+                else 0.0
+            )
             print(
                 f"  {op_name}: used={used}, feasible={feasible_moves} ({feasible_rate:.1f}%), "
                 f"accepted={accepted} ({accept_rate:.1f}%), improved={improved} ({improve_rate:.1f}%), "
-                f"avg_accepted_delta={avg_delta:.4f}"
+                f"avg_accepted_delta={avg_delta:.4f}, improve_per_1000_uses={improve_per_1k_uses:.2f}"
             )
 
     if plot_best_after_all and global_best_solution is not None:
@@ -719,7 +769,30 @@ def main():
     truck_route = [i for i in range(n_customers + 1)] + [0]
     initial_solution = [truck_route, [], []]
     configs = [
-        ("1", {"op1": 0.2, "op2": 0.5, "op3": 0.3}),
+        ("1", {"op1": 0.20, "op2": 0.55, "op3": 0.25}),
+        ("2", {"op1": 0.25, "op2": 0.50, "op3": 0.25}),
+        ("3", {"op1": 0.15, "op2": 0.60, "op3": 0.25}),
+        ("4", {"op1": 0.20, "op2": 0.60, "op3": 0.20}),
+        ("5", {"op1": 0.30, "op2": 0.50, "op3": 0.20}),
+
+        ("6", {"op1": 0.25, "op2": 0.55, "op3": 0.20}),
+        ("7", {"op1": 0.20, "op2": 0.50, "op3": 0.30}),
+        ("8", {"op1": 0.15, "op2": 0.65, "op3": 0.20}),
+        ("9", {"op1": 0.30, "op2": 0.45, "op3": 0.25}),
+        ("10", {"op1": 0.10, "op2": 0.65, "op3": 0.25}),
+
+        ("11", {"op1": 0.25, "op2": 0.45, "op3": 0.30}),
+        ("12", {"op1": 0.20, "op2": 0.60, "op3": 0.20}),
+        ("13", {"op1": 0.35, "op2": 0.45, "op3": 0.20}),
+        ("14", {"op1": 0.15, "op2": 0.55, "op3": 0.30}),
+        ("15", {"op1": 0.20, "op2": 0.50, "op3": 0.30}),
+
+        ("16", {"op1": 0.30, "op2": 0.50, "op3": 0.20}),
+        ("17", {"op1": 0.10, "op2": 0.60, "op3": 0.30}),
+        ("18", {"op1": 0.25, "op2": 0.60, "op3": 0.15}),
+        ("19", {"op1": 0.30, "op2": 0.40, "op3": 0.30}),
+        ("20", {"op1": 0.15, "op2": 0.55, "op3": 0.30})
+
     ]
 
     summary = []
