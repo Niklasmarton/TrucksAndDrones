@@ -99,12 +99,22 @@ def _candidate_insertion_indices(route_len, preferred_idx):
     return valid
 
 
+_MAX_CANDIDATES = 16
+
+
+def _truck_total_cost(truck, truck_times):
+    cost = 0.0
+    for i in range(len(truck) - 1):
+        cost += truck_times[truck[i]][truck[i + 1]]
+    return cost
+
+
 def operator(current_solution):
     """
     op3: drone-truck mode swap
     - Take one drone-served customer and put it into the truck.
     - Take one truck-served customer and insert it into the same drone route.
-    - Keep feasibility through pair building and route feasibility checks.
+    - Collects all valid candidates, scores by truck cost delta, returns best.
     """
     assert_context_is_set()
     truck_times, drone_times, _, depot = get_operator_context()
@@ -113,6 +123,8 @@ def operator(current_solution):
     truck = candidate[0]
     if len(truck) <= 3:
         return current_solution
+
+    old_truck_cost = _truck_total_cost(truck, truck_times)
 
     prefix = _prefix_truck_times(truck, truck_times)
     source = _pick_source_trip(candidate, prefix, drone_times)
@@ -133,6 +145,7 @@ def operator(current_solution):
     else:
         drone2_base.pop(trip_idx)
 
+    candidates = []
     truck_insert_positions = _best_insert_positions_for_node(truck, drone_node, truck_times, top_k=8)
     for ins_idx in truck_insert_positions:
         truck_after_insert = truck[:ins_idx] + [drone_node] + truck[ins_idx:]
@@ -168,7 +181,6 @@ def operator(current_solution):
             target_route = d1_final if route_id == 1 else d2_final
             other_route = d2_final if route_id == 1 else d1_final
 
-            # Keep swap local: insert close to the removed drone trip position.
             ins_candidates = _candidate_insertion_indices(len(target_route), trip_idx)
             preferred_pair = None
             if old_launch_node in truck_final and old_land_node in truck_final:
@@ -196,7 +208,22 @@ def operator(current_solution):
                     continue
 
                 if route_id == 1:
-                    return [truck_final, new_target_route, other_route]
-                return [truck_final, other_route, new_target_route]
+                    new_solution = [truck_final, new_target_route, other_route]
+                else:
+                    new_solution = [truck_final, other_route, new_target_route]
 
-    return current_solution
+                score = _truck_total_cost(truck_final, truck_times) - old_truck_cost
+                candidates.append((score, new_solution))
+
+                if len(candidates) >= _MAX_CANDIDATES:
+                    break
+            if len(candidates) >= _MAX_CANDIDATES:
+                break
+        if len(candidates) >= _MAX_CANDIDATES:
+            break
+
+    if not candidates:
+        return current_solution
+
+    candidates.sort(key=lambda x: x[0])
+    return candidates[0][1]
