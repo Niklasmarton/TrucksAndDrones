@@ -16,10 +16,9 @@ for p in (IO_DIR, OPS_DIR, CORE_DIR):
 from read_file import read_instance
 import op1_reinsert as op1
 import op2_truck2opt as op2
-import op3_truck_drone_swap as op3
+import op6_destroy as op3
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
-from drone_route_utils import build_drone_pair
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
 file_name = "F_100.txt"
@@ -119,145 +118,6 @@ def evaluate_solution(solution, calc, checker):
         return False, float("inf")
 
     return True, total_time
-
-
-def _build_greedy_truck_route(truck_times, depot):
-    n_nodes = len(truck_times)
-    unvisited = set(range(n_nodes))
-    unvisited.discard(depot)
-
-    route = [depot]
-    current = depot
-    while unvisited:
-        next_node = min(unvisited, key=lambda x: truck_times[current][x])
-        route.append(next_node)
-        unvisited.remove(next_node)
-        current = next_node
-    route.append(depot)
-    return route
-
-
-def _shift_drone_route_after_truck_removal(drone_route, removed_idx):
-    shifted = []
-    for cust, launch_idx, land_idx in drone_route:
-        if launch_idx == removed_idx or land_idx == removed_idx:
-            return None
-        if launch_idx > removed_idx:
-            launch_idx -= 1
-        if land_idx > removed_idx:
-            land_idx -= 1
-        shifted.append((cust, launch_idx, land_idx))
-    return shifted
-
-
-def _endpoint_indices_in_use(drone1, drone2):
-    used = set()
-    for route in (drone1, drone2):
-        for _, launch_idx, land_idx in route:
-            used.add(launch_idx)
-            used.add(land_idx)
-    return used
-
-
-def _seed_initial_drone_assignments(truck_route, instance_data, target_ratio=0.18, max_neighbors=8):
-    truck_times = instance_data["truck_times"]
-    drone_times = instance_data["drone_times"]
-    truck = truck_route[:]
-    drone1 = []
-    drone2 = []
-
-    max_seed = max(0, int((len(truck) - 2) * target_ratio))
-    for _ in range(max_seed):
-        used_endpoints = _endpoint_indices_in_use(drone1, drone2)
-        candidates = []
-        for idx in range(1, len(truck) - 1):
-            if idx in used_endpoints:
-                continue
-            prev_node = truck[idx - 1]
-            node = truck[idx]
-            next_node = truck[idx + 1]
-            saving = (
-                truck_times[prev_node][node]
-                + truck_times[node][next_node]
-                - truck_times[prev_node][next_node]
-            )
-            candidates.append((saving, idx, node))
-
-        if not candidates:
-            break
-        candidates.sort(reverse=True, key=lambda x: x[0])
-
-        inserted = False
-        for _, idx, node in candidates[:20]:
-            shifted_d1 = _shift_drone_route_after_truck_removal(drone1, idx)
-            shifted_d2 = _shift_drone_route_after_truck_removal(drone2, idx)
-            if shifted_d1 is None or shifted_d2 is None:
-                continue
-
-            trial_truck = truck[:idx] + truck[idx + 1 :]
-            route_order = [(1, shifted_d1), (2, shifted_d2)]
-            route_order.sort(key=lambda x: len(x[1]))
-
-            best_choice = None
-            for drone_id, route in route_order:
-                for insertion_index in range(len(route) + 1):
-                    pair = build_drone_pair(
-                        node,
-                        trial_truck,
-                        route,
-                        insertion_index,
-                        max_neighbors=max_neighbors,
-                        pair_explore_prob=0.0,
-                    )
-                    if pair is None:
-                        continue
-                    launch_node = trial_truck[pair[0]]
-                    land_node = trial_truck[pair[1]]
-                    trip_time = drone_times[launch_node][node] + drone_times[node][land_node]
-
-                    if best_choice is None or trip_time < best_choice[0]:
-                        best_choice = (trip_time, drone_id, insertion_index, pair, shifted_d1, shifted_d2)
-
-            if best_choice is None:
-                continue
-
-            _, drone_id, insertion_index, pair, shifted_d1, shifted_d2 = best_choice
-            trip = (node, pair[0], pair[1])
-            truck = trial_truck
-            drone1 = shifted_d1
-            drone2 = shifted_d2
-
-            if drone_id == 1:
-                drone1.insert(insertion_index, trip)
-            else:
-                drone2.insert(insertion_index, trip)
-
-            inserted = True
-            break
-
-        if not inserted:
-            break
-
-    return [truck, drone1, drone2]
-
-
-def build_greedy_initial_solution(instance_data, target_drone_ratio=0.18):
-    configure_operator_context(instance_data)
-    depot = instance_data.get("depot_index", 0)
-    truck_route = _build_greedy_truck_route(instance_data["truck_times"], depot)
-    seeded_solution = _seed_initial_drone_assignments(
-        truck_route,
-        instance_data,
-        target_ratio=target_drone_ratio,
-        max_neighbors=8,
-    )
-
-    _, calc, checker = build_evaluator(instance_data)
-    feasible, _ = evaluate_solution(seeded_solution, calc, checker)
-    if feasible:
-        return seeded_solution
-
-    return [truck_route, [], []]
 
 
 def _embed_2d_from_distance_matrix(distance_matrix):
@@ -480,6 +340,7 @@ def simulated_annealing(
             "feasible": 0,
             "accepted": 0,
             "improved": 0,
+            "uphill_accepted": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
         },
@@ -488,6 +349,7 @@ def simulated_annealing(
             "feasible": 0,
             "accepted": 0,
             "improved": 0,
+            "uphill_accepted": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
         },
@@ -496,6 +358,7 @@ def simulated_annealing(
             "feasible": 0,
             "accepted": 0,
             "improved": 0,
+            "uphill_accepted": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
         },
@@ -524,6 +387,7 @@ def simulated_annealing(
     deltas = []
 
     for _ in range(warmup_iterations):
+        #Returns the new solution based on the used operator and the key of that operator
         new_solution, op_key = apply_weighted_operator(incumbent, operator_weights=normalized_weights)
         op_name = op_key.split("_")[0]
         stats[op_name]["used"] += 1
@@ -553,12 +417,22 @@ def simulated_annealing(
             incumbent = new_solution
             incumbent_cost = new_cost
             stats[op_name]["accepted"] += 1
+            stats[op_name]["uphill_accepted"] += 1
             stats[op_name]["delta_sum"] += delta_e
 
     delta_avg = (sum(deltas) / len(deltas)) if deltas else 1.0
+    print(deltas)
     t0 = -delta_avg / math.log(0.8)
+    t0_used_fallback = False
     if t0 <= 0:
         t0 = 1.0
+        t0_used_fallback = True
+    stats["_meta"] = {
+        "warmup_delta_avg": delta_avg,
+        "warmup_delta_samples": len(deltas),
+        "t0": t0,
+        "t0_used_fallback": t0_used_fallback,
+    }
 
     alpha = (final_temperature / t0) ** (1.0 / iterations) if iterations > 0 else 1.0
     temperature = t0
@@ -592,6 +466,7 @@ def simulated_annealing(
                     incumbent = new_solution
                     incumbent_cost = new_cost
                     stats[op_name]["accepted"] += 1
+                    stats[op_name]["uphill_accepted"] += 1
                     stats[op_name]["delta_sum"] += delta_e
 
         temperature = alpha * temperature
@@ -638,6 +513,7 @@ def run_statistics(
             "feasible": 0,
             "accepted": 0,
             "improved": 0,
+            "uphill_accepted": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
         },
@@ -646,6 +522,7 @@ def run_statistics(
             "feasible": 0,
             "accepted": 0,
             "improved": 0,
+            "uphill_accepted": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
         },
@@ -654,10 +531,15 @@ def run_statistics(
             "feasible": 0,
             "accepted": 0,
             "improved": 0,
+            "uphill_accepted": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
         },
     }
+    warmup_delta_avgs = []
+    warmup_delta_samples = []
+    t0_values = []
+    t0_fallback_count = 0
 
     for run_id in range(runs):
         start = time.perf_counter()
@@ -681,8 +563,16 @@ def run_statistics(
             aggregate_stats[op_name]["feasible"] += op_stats[op_name]["feasible"]
             aggregate_stats[op_name]["accepted"] += op_stats[op_name]["accepted"]
             aggregate_stats[op_name]["improved"] += op_stats[op_name]["improved"]
+            aggregate_stats[op_name]["uphill_accepted"] += op_stats[op_name]["uphill_accepted"]
             aggregate_stats[op_name]["delta_sum"] += op_stats[op_name]["delta_sum"]
             aggregate_stats[op_name]["improve_delta_sum"] += op_stats[op_name]["improve_delta_sum"]
+        run_meta = op_stats.get("_meta")
+        if run_meta is not None:
+            warmup_delta_avgs.append(run_meta.get("warmup_delta_avg", 0.0))
+            warmup_delta_samples.append(run_meta.get("warmup_delta_samples", 0))
+            t0_values.append(run_meta.get("t0", 0.0))
+            if run_meta.get("t0_used_fallback", False):
+                t0_fallback_count += 1
 
         run_costs.append(best_cost)
         run_times.append(elapsed)
@@ -706,6 +596,14 @@ def run_statistics(
         "improvement_abs": improvement_abs,
         "improvement_pct": improvement_pct,
         "average_runtime": avg_runtime_per_run,
+        "warmup_delta_avg_mean": (
+            sum(warmup_delta_avgs) / len(warmup_delta_avgs) if warmup_delta_avgs else 0.0
+        ),
+        "warmup_delta_samples_mean": (
+            sum(warmup_delta_samples) / len(warmup_delta_samples) if warmup_delta_samples else 0.0
+        ),
+        "t0_mean": (sum(t0_values) / len(t0_values) if t0_values else 0.0),
+        "t0_fallback_runs": t0_fallback_count,
     }
 
     if verbose:
@@ -716,6 +614,19 @@ def run_statistics(
             f"Improvement over initial solution: {improvement_abs} "
             f"({improvement_pct:.2f}% reduction)"
         )
+        if t0_values:
+            warmup_delta_avg_mean = sum(warmup_delta_avgs) / len(warmup_delta_avgs)
+            warmup_samples_mean = sum(warmup_delta_samples) / len(warmup_delta_samples)
+            t0_mean = sum(t0_values) / len(t0_values)
+            t0_min = min(t0_values)
+            t0_max = max(t0_values)
+            print(
+                "SA temperature diagnostics: "
+                f"warmup_delta_avg_mean={warmup_delta_avg_mean:.4f}, "
+                f"warmup_samples_mean={warmup_samples_mean:.1f}, "
+                f"t0_mean={t0_mean:.4f}, t0_min={t0_min:.4f}, t0_max={t0_max:.4f}, "
+                f"t0_fallback_runs={t0_fallback_count}/{runs}"
+            )
         if global_best_solution is not None:
             print("Solution on pipe format:")
             print(format_solution_pipe(global_best_solution))
@@ -725,12 +636,14 @@ def run_statistics(
             feasible_moves = aggregate_stats[op_name]["feasible"]
             accepted = aggregate_stats[op_name]["accepted"]
             improved = aggregate_stats[op_name]["improved"]
+            uphill_accepted = aggregate_stats[op_name]["uphill_accepted"]
             avg_delta = (
                 aggregate_stats[op_name]["delta_sum"] / accepted if accepted > 0 else float("nan")
             )
             feasible_rate = (feasible_moves / used * 100.0) if used > 0 else 0.0
             accept_rate = (accepted / feasible_moves * 100.0) if feasible_moves > 0 else 0.0
             improve_rate = (improved / accepted * 100.0) if accepted > 0 else 0.0
+            uphill_rate = (uphill_accepted / accepted * 100.0) if accepted > 0 else 0.0
             improve_per_1k_uses = (
                 aggregate_stats[op_name]["improve_delta_sum"] * 1000.0 / used
                 if used > 0
@@ -739,6 +652,7 @@ def run_statistics(
             print(
                 f"  {op_name}: used={used}, feasible={feasible_moves} ({feasible_rate:.1f}%), "
                 f"accepted={accepted} ({accept_rate:.1f}%), improved={improved} ({improve_rate:.1f}%), "
+                f"uphill_accepted={uphill_accepted} ({uphill_rate:.1f}%), "
                 f"avg_accepted_delta={avg_delta:.4f}, improve_per_1000_uses={improve_per_1k_uses:.2f}"
             )
 
@@ -769,29 +683,7 @@ def main():
     truck_route = [i for i in range(n_customers + 1)] + [0]
     initial_solution = [truck_route, [], []]
     configs = [
-        ("1", {"op1": 0.20, "op2": 0.55, "op3": 0.25}),
-        ("2", {"op1": 0.25, "op2": 0.50, "op3": 0.25}),
-        ("3", {"op1": 0.15, "op2": 0.60, "op3": 0.25}),
-        ("4", {"op1": 0.20, "op2": 0.60, "op3": 0.20}),
-        ("5", {"op1": 0.30, "op2": 0.50, "op3": 0.20}),
-
-        ("6", {"op1": 0.25, "op2": 0.55, "op3": 0.20}),
-        ("7", {"op1": 0.20, "op2": 0.50, "op3": 0.30}),
-        ("8", {"op1": 0.15, "op2": 0.65, "op3": 0.20}),
-        ("9", {"op1": 0.30, "op2": 0.45, "op3": 0.25}),
-        ("10", {"op1": 0.10, "op2": 0.65, "op3": 0.25}),
-
-        ("11", {"op1": 0.25, "op2": 0.45, "op3": 0.30}),
-        ("12", {"op1": 0.20, "op2": 0.60, "op3": 0.20}),
-        ("13", {"op1": 0.35, "op2": 0.45, "op3": 0.20}),
-        ("14", {"op1": 0.15, "op2": 0.55, "op3": 0.30}),
-        ("15", {"op1": 0.20, "op2": 0.50, "op3": 0.30}),
-
-        ("16", {"op1": 0.30, "op2": 0.50, "op3": 0.20}),
-        ("17", {"op1": 0.10, "op2": 0.60, "op3": 0.30}),
-        ("18", {"op1": 0.25, "op2": 0.60, "op3": 0.15}),
-        ("19", {"op1": 0.30, "op2": 0.40, "op3": 0.30}),
-        ("20", {"op1": 0.15, "op2": 0.55, "op3": 0.30})
+        ("1", {"op1": 0.2, "op2": 0.6, "op3": 0.2}),
 
     ]
 

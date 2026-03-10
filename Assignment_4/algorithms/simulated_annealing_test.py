@@ -9,21 +9,15 @@ if str(ALG_DIR) not in sys.path:
 import simulated_annealing_3op_weighted as sa_weighted
 
 
-def build_construction_initial_solution(instance_data):
-    """
-    Construction heuristic for the initial solution:
-    - Greedy truck route
-    - Seeded feasible drone assignments
-    """
-    return sa_weighted.build_greedy_initial_solution(
-        instance_data,
-        target_drone_ratio=0.18,
-    )
+def build_index_order_truck_only_initial_solution(instance_data):
+    n_customers = instance_data["n_customers"]
+    truck_route = [i for i in range(n_customers + 1)] + [0]
+    return [truck_route, [], []]
 
 
 def main():
     instance_data = sa_weighted.load_instance()
-    initial_solution = build_construction_initial_solution(instance_data)
+    initial_solution = build_index_order_truck_only_initial_solution(instance_data)
 
     configs = [
         ("Balanced", {"op1": 0.15, "op2": 0.50, "op3": 0.35}),

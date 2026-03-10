@@ -18,7 +18,7 @@ for p in (IO_DIR, OPS_DIR, CORE_DIR):
 from read_file import read_instance
 import op1_reinsert as op1
 import op2_truck2opt as op2
-import op3_truck_drone_swap as op3
+import op6_destroy as op3
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
 
