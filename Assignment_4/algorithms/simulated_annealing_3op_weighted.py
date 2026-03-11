@@ -21,7 +21,7 @@ from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
-file_name = "Truck_Drone_Contest.txt"
+file_name = "F_100.txt"
 
 
 def clone_solution(solution):
@@ -758,7 +758,7 @@ def main():
     truck_route = [i for i in range(n_customers + 1)] + [0]
     initial_solution = [truck_route, [], []]
     configs = [
-        ("1", {"op1": 0.2, "op2": 0.7, "op3": 0.1}),
+        ("1", {"op1": 0.5, "op2": 0.2, "op3": 0.3}),
     ]
 
     summary = []

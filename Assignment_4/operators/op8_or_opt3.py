@@ -13,7 +13,7 @@ from drone_route_utils import (
 )
 from operator_context import assert_context_is_set, get_operator_context, set_operator_context
 
-_EXPLORE_PROB = 0.10
+_EXPLORE_PROB = 0.12
 _SYNC_PEN_WEIGHT = 0.10
 _SEARCH_PROGRESS = 0.5
 
@@ -143,10 +143,10 @@ def _candidate_moves(truck, truck_times):
             moves.extend(local[:keep])
 
     moves.sort(key=lambda x: x[0])
-    if random.random() < _EXPLORE_PROB and len(moves) > 10:
-        top = moves[:10]
+    if random.random() < _EXPLORE_PROB and len(moves) > 12:
+        top = moves[:12]
         random.shuffle(top)
-        return top + moves[10:]
+        return top + moves[12:]
     return moves
 
 
@@ -200,6 +200,6 @@ def truck_2opt(solution):
 
     feasible_candidates.sort(key=lambda x: x[0])
     if random.random() < _EXPLORE_PROB:
-        top_k = min(3, len(feasible_candidates))
+        top_k = min(4, len(feasible_candidates))
         return random.choice(feasible_candidates[:top_k])[1]
     return feasible_candidates[0][1]

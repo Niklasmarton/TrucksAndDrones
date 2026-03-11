@@ -47,6 +47,11 @@ def build_drone_pair(
     neighbor_cap = max(2, min(max_neighbors, len(ranked_idx)))
     nearest_idx = ranked_idx[:neighbor_cap]
 
+    # Prefix truck times for O(1) truck segment duration lookups.
+    truck_prefix = [0.0]
+    for i in range(len(truck_route) - 1):
+        truck_prefix.append(truck_prefix[-1] + T[truck_route[i]][truck_route[i + 1]])
+
     def feasible_pairs(index_pool):
         pairs = []
         for launch_idx in index_pool:
@@ -60,18 +65,23 @@ def build_drone_pair(
                 trip = D[launch_city][node] + D[node][land_city]
                 if trip > flight_limit:
                     continue
-                pairs.append((trip, launch_idx, land_idx))
+                truck_time = truck_prefix[land_idx] - truck_prefix[launch_idx]
+                wait_excess = max(0.0, trip - truck_time)
+                mismatch = abs(trip - truck_time)
+                # Prefer pairs that synchronize drone sortie with truck travel.
+                score = 3.0 * wait_excess + 0.6 * mismatch + 0.02 * trip
+                pairs.append((score, trip, launch_idx, land_idx))
         return pairs
 
     def pick_from_pairs(pairs):
         if not pairs:
             return None
-        pairs.sort(key=lambda x: x[0])
+        pairs.sort(key=lambda x: (x[0], x[1]))
         if random.random() < pair_explore_prob:
             k = min(4, len(pairs))
-            _, launch_idx, land_idx = random.choice(pairs[:k])
+            _, _, launch_idx, land_idx = random.choice(pairs[:k])
         else:
-            _, launch_idx, land_idx = pairs[0]
+            _, _, launch_idx, land_idx = pairs[0]
         return launch_idx, land_idx
 
     pair = pick_from_pairs(feasible_pairs(nearest_idx))

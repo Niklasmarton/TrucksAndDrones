@@ -12,7 +12,7 @@ from operator_context import assert_context_is_set, get_operator_context, set_op
 
 # Exploration settings
 _EXPLORE_PROB = 0.12
-_PAIR_EXPLORE_PROB = 0.08
+_PAIR_EXPLORE_PROB = 0.10
 _TRUCK_TO_DRONE_BIAS = 0.0
 _SEARCH_PROGRESS = 0.5
 _SYNC_PEN_WEIGHT = 0.15
@@ -137,7 +137,6 @@ def _choose_truck_removal_index(truck):
 def _choose_drone_removal_index(route):
     if not route:
         return None
-
     return random.randint(0, len(route) - 1)
 
 
@@ -515,11 +514,11 @@ def operator(current_solution):
 
     candidates.sort(key=lambda x: x[0])
     if _SEARCH_PROGRESS < 0.35:
-        explore_pick_prob = 0.10
-    elif _SEARCH_PROGRESS < 0.75:
         explore_pick_prob = 0.14
+    elif _SEARCH_PROGRESS < 0.75:
+        explore_pick_prob = 0.20
     else:
-        explore_pick_prob = 0.06
+        explore_pick_prob = 0.08
     if random.random() < explore_pick_prob:
         return random.choice(candidates[: min(3, len(candidates))])[1]
     return candidates[0][1]
