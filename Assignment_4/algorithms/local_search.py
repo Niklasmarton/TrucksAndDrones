@@ -315,7 +315,7 @@ def main():
     initial_solution = build_index_order_truck_only_initial_solution(instance_data)
 
     configs = [
-        ("LS-Balanced", {"op1": 0.20, "op2": 0.6, "op3": 0.2}),
+        ("LS-Balanced", {"op1": 0.2, "op2": 0.7, "op3": 0.1}),
     ]
 
     summary = []

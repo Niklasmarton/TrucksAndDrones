@@ -15,7 +15,7 @@ for p in (IO_DIR, OPS_DIR, CORE_DIR):
 
 from read_file import read_instance
 import op1_reinsert as op1
-import op2_truck2opt as op2
+import op8_or_opt3 as op2
 import op6_destroy as op3
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
@@ -341,8 +341,13 @@ def simulated_annealing(
             "accepted": 0,
             "improved": 0,
             "uphill_accepted": 0,
+            "uphill_rejected": 0,
+            "worse_feasible": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
+            "uphill_accepted_delta_sum": 0.0,
+            "p_accept_sum": 0.0,
+            "p_accept_count": 0,
         },
         "op2": {
             "used": 0,
@@ -350,8 +355,13 @@ def simulated_annealing(
             "accepted": 0,
             "improved": 0,
             "uphill_accepted": 0,
+            "uphill_rejected": 0,
+            "worse_feasible": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
+            "uphill_accepted_delta_sum": 0.0,
+            "p_accept_sum": 0.0,
+            "p_accept_count": 0,
         },
         "op3": {
             "used": 0,
@@ -359,8 +369,13 @@ def simulated_annealing(
             "accepted": 0,
             "improved": 0,
             "uphill_accepted": 0,
+            "uphill_rejected": 0,
+            "worse_feasible": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
+            "uphill_accepted_delta_sum": 0.0,
+            "p_accept_sum": 0.0,
+            "p_accept_count": 0,
         },
     }
 
@@ -401,7 +416,8 @@ def simulated_annealing(
         stats[op_name]["feasible"] += 1
 
         delta_e = new_cost - incumbent_cost
-        deltas.append(delta_e)
+        if delta_e >= 0:
+            deltas.append(delta_e)
 
         if delta_e < 0:
             incumbent = new_solution
@@ -413,15 +429,19 @@ def simulated_annealing(
             if incumbent_cost < best_cost:
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
-        elif random.random() < 0.8:
-            incumbent = new_solution
-            incumbent_cost = new_cost
-            stats[op_name]["accepted"] += 1
-            stats[op_name]["uphill_accepted"] += 1
-            stats[op_name]["delta_sum"] += delta_e
+        else:
+            stats[op_name]["worse_feasible"] += 1
+            if random.random() < 0.8:
+                incumbent = new_solution
+                incumbent_cost = new_cost
+                stats[op_name]["accepted"] += 1
+                stats[op_name]["uphill_accepted"] += 1
+                stats[op_name]["delta_sum"] += delta_e
+                stats[op_name]["uphill_accepted_delta_sum"] += delta_e
+            else:
+                stats[op_name]["uphill_rejected"] += 1
 
     delta_avg = (sum(deltas) / len(deltas)) if deltas else 1.0
-    print(deltas)
     t0 = -delta_avg / math.log(0.8)
     t0_used_fallback = False
     if t0 <= 0:
@@ -461,13 +481,19 @@ def simulated_annealing(
                     best_solution = clone_solution(incumbent)
                     best_cost = incumbent_cost
             else:
+                stats[op_name]["worse_feasible"] += 1
                 p_accept = math.exp(-delta_e / temperature) if temperature > 0 else 0.0
+                stats[op_name]["p_accept_sum"] += p_accept
+                stats[op_name]["p_accept_count"] += 1
                 if random.random() < p_accept:
                     incumbent = new_solution
                     incumbent_cost = new_cost
                     stats[op_name]["accepted"] += 1
                     stats[op_name]["uphill_accepted"] += 1
                     stats[op_name]["delta_sum"] += delta_e
+                    stats[op_name]["uphill_accepted_delta_sum"] += delta_e
+                else:
+                    stats[op_name]["uphill_rejected"] += 1
 
         temperature = alpha * temperature
 
@@ -514,8 +540,13 @@ def run_statistics(
             "accepted": 0,
             "improved": 0,
             "uphill_accepted": 0,
+            "uphill_rejected": 0,
+            "worse_feasible": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
+            "uphill_accepted_delta_sum": 0.0,
+            "p_accept_sum": 0.0,
+            "p_accept_count": 0,
         },
         "op2": {
             "used": 0,
@@ -523,8 +554,13 @@ def run_statistics(
             "accepted": 0,
             "improved": 0,
             "uphill_accepted": 0,
+            "uphill_rejected": 0,
+            "worse_feasible": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
+            "uphill_accepted_delta_sum": 0.0,
+            "p_accept_sum": 0.0,
+            "p_accept_count": 0,
         },
         "op3": {
             "used": 0,
@@ -532,8 +568,13 @@ def run_statistics(
             "accepted": 0,
             "improved": 0,
             "uphill_accepted": 0,
+            "uphill_rejected": 0,
+            "worse_feasible": 0,
             "delta_sum": 0.0,
             "improve_delta_sum": 0.0,
+            "uphill_accepted_delta_sum": 0.0,
+            "p_accept_sum": 0.0,
+            "p_accept_count": 0,
         },
     }
     warmup_delta_avgs = []
@@ -564,8 +605,15 @@ def run_statistics(
             aggregate_stats[op_name]["accepted"] += op_stats[op_name]["accepted"]
             aggregate_stats[op_name]["improved"] += op_stats[op_name]["improved"]
             aggregate_stats[op_name]["uphill_accepted"] += op_stats[op_name]["uphill_accepted"]
+            aggregate_stats[op_name]["uphill_rejected"] += op_stats[op_name]["uphill_rejected"]
+            aggregate_stats[op_name]["worse_feasible"] += op_stats[op_name]["worse_feasible"]
             aggregate_stats[op_name]["delta_sum"] += op_stats[op_name]["delta_sum"]
             aggregate_stats[op_name]["improve_delta_sum"] += op_stats[op_name]["improve_delta_sum"]
+            aggregate_stats[op_name]["uphill_accepted_delta_sum"] += op_stats[op_name][
+                "uphill_accepted_delta_sum"
+            ]
+            aggregate_stats[op_name]["p_accept_sum"] += op_stats[op_name]["p_accept_sum"]
+            aggregate_stats[op_name]["p_accept_count"] += op_stats[op_name]["p_accept_count"]
         run_meta = op_stats.get("_meta")
         if run_meta is not None:
             warmup_delta_avgs.append(run_meta.get("warmup_delta_avg", 0.0))
@@ -637,6 +685,8 @@ def run_statistics(
             accepted = aggregate_stats[op_name]["accepted"]
             improved = aggregate_stats[op_name]["improved"]
             uphill_accepted = aggregate_stats[op_name]["uphill_accepted"]
+            uphill_rejected = aggregate_stats[op_name]["uphill_rejected"]
+            worse_feasible = aggregate_stats[op_name]["worse_feasible"]
             avg_delta = (
                 aggregate_stats[op_name]["delta_sum"] / accepted if accepted > 0 else float("nan")
             )
@@ -644,6 +694,19 @@ def run_statistics(
             accept_rate = (accepted / feasible_moves * 100.0) if feasible_moves > 0 else 0.0
             improve_rate = (improved / accepted * 100.0) if accepted > 0 else 0.0
             uphill_rate = (uphill_accepted / accepted * 100.0) if accepted > 0 else 0.0
+            uphill_of_worse_rate = (
+                uphill_accepted / worse_feasible * 100.0 if worse_feasible > 0 else 0.0
+            )
+            avg_uphill_accepted_delta = (
+                aggregate_stats[op_name]["uphill_accepted_delta_sum"] / uphill_accepted
+                if uphill_accepted > 0
+                else float("nan")
+            )
+            mean_p_accept = (
+                aggregate_stats[op_name]["p_accept_sum"] / aggregate_stats[op_name]["p_accept_count"]
+                if aggregate_stats[op_name]["p_accept_count"] > 0
+                else float("nan")
+            )
             improve_per_1k_uses = (
                 aggregate_stats[op_name]["improve_delta_sum"] * 1000.0 / used
                 if used > 0
@@ -653,6 +716,9 @@ def run_statistics(
                 f"  {op_name}: used={used}, feasible={feasible_moves} ({feasible_rate:.1f}%), "
                 f"accepted={accepted} ({accept_rate:.1f}%), improved={improved} ({improve_rate:.1f}%), "
                 f"uphill_accepted={uphill_accepted} ({uphill_rate:.1f}%), "
+                f"worse_feasible={worse_feasible}, uphill_accept_of_worse={uphill_of_worse_rate:.1f}%, "
+                f"uphill_rejected={uphill_rejected}, mean_p_accept={mean_p_accept:.4f}, "
+                f"avg_uphill_accepted_delta={avg_uphill_accepted_delta:.4f}, "
                 f"avg_accepted_delta={avg_delta:.4f}, improve_per_1000_uses={improve_per_1k_uses:.2f}"
             )
 
@@ -683,8 +749,7 @@ def main():
     truck_route = [i for i in range(n_customers + 1)] + [0]
     initial_solution = [truck_route, [], []]
     configs = [
-        ("1", {"op1": 0.2, "op2": 0.6, "op3": 0.2}),
-
+        ("1", {"op1": 0.2, "op2": 0.7, "op3": 0.1}),
     ]
 
     summary = []
@@ -697,8 +762,8 @@ def main():
             clone_solution(initial_solution),
             instance_data=instance_data,
             runs=10,
-            warmup_iterations=100,
-            iterations=9900,
+            warmup_iterations=500,
+            iterations=9500,
             final_temperature=0.1,
             cache_limit=200000,
             plot_best_after_all=False,
