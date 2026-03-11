@@ -12,14 +12,16 @@ from operator_context import assert_context_is_set, get_operator_context, set_op
 
 # Exploration settings
 _EXPLORE_PROB = 0.12
-_PAIR_EXPLORE_PROB = 0.12
+_PAIR_EXPLORE_PROB = 0.08
 _TRUCK_TO_DRONE_BIAS = 0.0
+_SEARCH_PROGRESS = 0.5
+_SYNC_PEN_WEIGHT = 0.15
 
 # New tuning knobs
 _MAX_ATTEMPTS = 5
 _TOP_K_TRUCK_REMOVALS = 4
 _TOP_K_TRUCK_INSERTIONS = 5
-_MAX_DRONE_INSERTION_TRIALS = 4
+_MAX_DRONE_INSERTION_TRIALS = 6
 
 
 def reset_operator_state():
@@ -37,6 +39,11 @@ def set_truck_to_drone_bias(bias):
     """
     global _TRUCK_TO_DRONE_BIAS
     _TRUCK_TO_DRONE_BIAS = _clamp01(bias)
+
+
+def set_search_progress(progress):
+    global _SEARCH_PROGRESS
+    _SEARCH_PROGRESS = _clamp01(progress)
 
 
 def _clone_solution(solution):
@@ -157,7 +164,15 @@ def _select_valid_source(solution):
     if len(valid_sources) == 1:
         return valid_sources[0]
 
-    truck_pick_prob = 0.34 + 0.36 * _TRUCK_TO_DRONE_BIAS
+    if _SEARCH_PROGRESS < 0.35:
+        # Early: truck-first shaping.
+        truck_pick_prob = 0.22 + 0.18 * _TRUCK_TO_DRONE_BIAS
+    elif _SEARCH_PROGRESS < 0.75:
+        # Mid: more mixed assignment.
+        truck_pick_prob = 0.34 + 0.36 * _TRUCK_TO_DRONE_BIAS
+    else:
+        # Late: preserve some truck refinement.
+        truck_pick_prob = 0.28 + 0.22 * _TRUCK_TO_DRONE_BIAS
 
     if 0 in valid_sources and random.random() < truck_pick_prob:
         return 0
@@ -193,14 +208,26 @@ def _select_insert_target(removal_choice, solution):
         return random.choice(choices)
 
     if removal_choice == 0:
-        # Truck -> drone bias only, no desired drone count target.
-        truck_to_drone_prob = 0.30 + 0.45 * _TRUCK_TO_DRONE_BIAS
+        # Phase-aware truck->drone pressure:
+        # early lower, mid higher, late moderate.
+        if _SEARCH_PROGRESS < 0.35:
+            truck_to_drone_prob = 0.18 + 0.22 * _TRUCK_TO_DRONE_BIAS
+        elif _SEARCH_PROGRESS < 0.75:
+            truck_to_drone_prob = 0.34 + 0.40 * _TRUCK_TO_DRONE_BIAS
+        else:
+            truck_to_drone_prob = 0.24 + 0.26 * _TRUCK_TO_DRONE_BIAS
         if random.random() < truck_to_drone_prob:
             return 1 if len(drone1) <= len(drone2) else 2
         return 0
 
     # Drone source: usually try truck, sometimes swap drone route
-    if random.random() < 0.70:
+    if _SEARCH_PROGRESS < 0.35:
+        truck_insert_prob = 0.85
+    elif _SEARCH_PROGRESS < 0.75:
+        truck_insert_prob = 0.70
+    else:
+        truck_insert_prob = 0.78
+    if random.random() < truck_insert_prob:
         return 0
     return 2 if removal_choice == 1 else 1
 
@@ -427,24 +454,72 @@ def _truck_total_cost(truck, truck_times):
     return cost
 
 
+def _prefix_truck_times(truck_route, truck_times):
+    prefix = [0.0]
+    for i in range(len(truck_route) - 1):
+        prefix.append(prefix[-1] + truck_times[truck_route[i]][truck_route[i + 1]])
+    return prefix
+
+
+def _trip_penalty(trip, truck_route, prefix, drone_times):
+    node, launch_idx, land_idx = trip
+    if (
+        launch_idx < 0
+        or land_idx < 0
+        or launch_idx >= len(truck_route)
+        or land_idx >= len(truck_route)
+        or launch_idx >= land_idx
+    ):
+        # Invalid endpoint mapping: treat as a very poor candidate.
+        return 1e9
+    launch_node = truck_route[launch_idx]
+    land_node = truck_route[land_idx]
+    sortie_time = drone_times[launch_node][node] + drone_times[node][land_node]
+    truck_time = prefix[land_idx] - prefix[launch_idx]
+    wait_excess = max(0.0, sortie_time - truck_time)
+    mismatch = abs(sortie_time - truck_time)
+    return 3.0 * wait_excess + 0.6 * mismatch + 0.02 * sortie_time
+
+
+def _solution_sync_penalty(solution, truck_times, drone_times):
+    truck, drone1, drone2 = solution
+    prefix = _prefix_truck_times(truck, truck_times)
+    pen = 0.0
+    for trip in drone1:
+        pen += _trip_penalty(trip, truck, prefix, drone_times)
+    for trip in drone2:
+        pen += _trip_penalty(trip, truck, prefix, drone_times)
+    pen += 2.0 * abs(len(drone1) - len(drone2))
+    return pen
+
+
 def operator(current_solution):
     assert_context_is_set()
-    truck_times, _, _, _ = get_operator_context()
+    truck_times, drone_times, _, _ = get_operator_context()
 
     old_truck_cost = _truck_total_cost(current_solution[0], truck_times)
+    old_sync_penalty = _solution_sync_penalty(current_solution, truck_times, drone_times)
 
     candidates = []
     for _ in range(_MAX_ATTEMPTS):
         candidate = _attempt_operator_move(current_solution)
         if candidate is None or candidate == current_solution:
             continue
-        score = _truck_total_cost(candidate[0], truck_times) - old_truck_cost
+        truck_delta = _truck_total_cost(candidate[0], truck_times) - old_truck_cost
+        sync_delta = _solution_sync_penalty(candidate, truck_times, drone_times) - old_sync_penalty
+        score = truck_delta + _SYNC_PEN_WEIGHT * sync_delta
         candidates.append((score, candidate))
 
     if not candidates:
         return current_solution
 
     candidates.sort(key=lambda x: x[0])
-    if random.random() < 0.25:
+    if _SEARCH_PROGRESS < 0.35:
+        explore_pick_prob = 0.10
+    elif _SEARCH_PROGRESS < 0.75:
+        explore_pick_prob = 0.14
+    else:
+        explore_pick_prob = 0.06
+    if random.random() < explore_pick_prob:
         return random.choice(candidates[: min(3, len(candidates))])[1]
     return candidates[0][1]

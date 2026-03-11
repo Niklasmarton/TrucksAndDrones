@@ -15,6 +15,16 @@ from operator_context import assert_context_is_set, get_operator_context, set_op
 
 _EXPLORE_PROB = 0.10
 _SYNC_PEN_WEIGHT = 0.10
+_SEARCH_PROGRESS = 0.5
+
+
+def _clamp01(value):
+    return max(0.0, min(1.0, float(value)))
+
+
+def set_search_progress(progress):
+    global _SEARCH_PROGRESS
+    _SEARCH_PROGRESS = _clamp01(progress)
 
 
 def _clone_solution(solution):
@@ -101,7 +111,14 @@ def _candidate_moves(truck, truck_times):
         return []
 
     moves = []
-    for seg_len in (1, 2, 3):
+    if _SEARCH_PROGRESS < 0.35:
+        seg_lengths = (1, 2, 3)
+    elif _SEARCH_PROGRESS < 0.75:
+        seg_lengths = (1, 2, 3) if random.random() < 0.55 else (1, 2)
+    else:
+        seg_lengths = (1, 2)
+
+    for seg_len in seg_lengths:
         if n - 2 <= seg_len:
             continue
         for start in range(1, n - seg_len):

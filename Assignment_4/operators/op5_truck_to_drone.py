@@ -10,6 +10,8 @@ from drone_route_utils import build_drone_pair, drone_route_is_feasible
 from operator_context import assert_context_is_set, get_operator_context, set_operator_context
 
 _EXPLORE_PROB = 0.14
+_MIN_NET_IMPROVEMENT_SCORE = 160
+_FALLBACK_ACCEPT_PROB = 0.08
 
 
 def _clone_solution(solution):
@@ -220,7 +222,19 @@ def operator(current_solution):
         return current_solution
 
     generated.sort(key=lambda x: x[0])
-    if random.random() < _EXPLORE_PROB:
-        return random.choice(generated[: min(3, len(generated))])[1]
-    return generated[0][1]
+    best_score, best_solution = generated[0]
 
+    # Prevent forcing poor truck->drone reassignments unless we explicitly
+    # take a small fallback exploration step.
+    if best_score >= _MIN_NET_IMPROVEMENT_SCORE:
+        if random.random() < _FALLBACK_ACCEPT_PROB:
+            top_k = min(2, len(generated))
+            return random.choice(generated[:top_k])[1]
+        return current_solution
+
+    if random.random() < _EXPLORE_PROB:
+        top_k = min(3, len(generated))
+        top_candidates = [entry for entry in generated[:top_k] if entry[0] < _MIN_NET_IMPROVEMENT_SCORE]
+        if top_candidates:
+            return random.choice(top_candidates)[1]
+    return best_solution

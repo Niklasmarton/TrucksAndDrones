@@ -10,6 +10,16 @@ from drone_route_utils import build_drone_pair, drone_route_is_feasible
 from operator_context import assert_context_is_set, get_operator_context, set_operator_context
 
 _EXPLORE_PROB = 0.15
+_SEARCH_PROGRESS = 0.5
+
+
+def _clamp01(value):
+    return max(0.0, min(1.0, float(value)))
+
+
+def set_search_progress(progress):
+    global _SEARCH_PROGRESS
+    _SEARCH_PROGRESS = _clamp01(progress)
 
 
 def _clone_solution(solution):
@@ -188,6 +198,11 @@ def operator(current_solution):
     """
     assert_context_is_set()
     truck_times, drone_times, _, depot = get_operator_context()
+
+    # Early phase: keep LNS mostly quiet to let truck-focused operators
+    # establish a stronger backbone route first.
+    if _SEARCH_PROGRESS < 0.35 and random.random() < 0.70:
+        return current_solution
 
     candidate = _clone_solution(current_solution)
     truck, drone1, drone2 = candidate

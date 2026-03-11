@@ -21,7 +21,7 @@ from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
 
 absolute_path = "/Users/niklasmarton/Library/CloudStorage/OneDrive-Personlig/ITØK/Metaheuristics/TrucksAndDrones/Test_files/"
-file_name = "F_100.txt"
+file_name = "Truck_Drone_Contest.txt"
 
 
 def clone_solution(solution):
@@ -54,6 +54,12 @@ def configure_operator_context(instance_data):
     op1.set_operator_context(truck_times, drone_times, range_limit, depot_idx)
     op2.set_operator_context(truck_times, drone_times, range_limit, depot_idx)
     op3.set_operator_context(truck_times, drone_times, range_limit, depot_idx)
+
+
+def configure_operator_search_progress(progress):
+    for op in (op1, op2, op3):
+        if hasattr(op, "set_search_progress"):
+            op.set_search_progress(progress)
 
 
 def build_evaluator(instance_data):
@@ -400,8 +406,10 @@ def simulated_annealing(
     best_solution = clone_solution(incumbent)
     best_cost = incumbent_cost
     deltas = []
+    total_steps = max(1, warmup_iterations + iterations)
 
-    for _ in range(warmup_iterations):
+    for w in range(warmup_iterations):
+        configure_operator_search_progress(w / total_steps)
         #Returns the new solution based on the used operator and the key of that operator
         new_solution, op_key = apply_weighted_operator(incumbent, operator_weights=normalized_weights)
         op_name = op_key.split("_")[0]
@@ -457,7 +465,8 @@ def simulated_annealing(
     alpha = (final_temperature / t0) ** (1.0 / iterations) if iterations > 0 else 1.0
     temperature = t0
 
-    for _ in range(iterations):
+    for it in range(iterations):
+        configure_operator_search_progress((warmup_iterations + it) / total_steps)
         new_solution, op_key = apply_weighted_operator(incumbent, operator_weights=normalized_weights)
         op_name = op_key.split("_")[0]
         stats[op_name]["used"] += 1

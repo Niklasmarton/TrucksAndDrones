@@ -99,7 +99,8 @@ def local_search(
     best_cost = incumbent_cost
     no_improve_steps = 0
 
-    for _ in range(iterations):
+    for it in range(iterations):
+        sa_weighted.configure_operator_search_progress(it / max(1, iterations))
         new_solution, op_key = sa_weighted.apply_weighted_operator(
             incumbent,
             operator_weights=normalized_weights,
