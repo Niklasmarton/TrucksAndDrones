@@ -167,6 +167,7 @@ def run_statistics(
     operator_weights=None,
     verbose=True,
     return_metrics=False,
+    print_solution_pipe=False,
 ):
     if instance_data is None:
         instance_data = sa_weighted.load_instance()
@@ -266,7 +267,7 @@ def run_statistics(
             f"Improvement over initial solution: {improvement_abs} "
             f"({improvement_pct:.2f}% reduction)"
         )
-        if global_best_solution is not None:
+        if print_solution_pipe and global_best_solution is not None:
             print("Solution on pipe format:")
             print(format_solution_pipe(global_best_solution))
         print("Operator contribution stats (aggregated):")
@@ -314,9 +315,10 @@ def format_solution_pipe(solution):
 def main():
     instance_data = sa_weighted.load_instance()
     initial_solution = build_index_order_truck_only_initial_solution(instance_data)
+    print_solution_pipe_main = False
 
     configs = [
-        ("LS-Balanced", {"op1": 0.3, "op2": 0.5, "op3": 0.2}),
+        ("OP1 heavy even more balanced", {"op1": 0.2, "op2": 0.75, "op3": 0.05}),       
     ]
 
     summary = []
@@ -337,6 +339,7 @@ def main():
             operator_weights=weights,
             verbose=True,
             return_metrics=True,
+            print_solution_pipe=print_solution_pipe_main,
         )
         summary.append((name, metrics["average_score"], best_cost, best_solution))
         if best_cost < global_best_cost:
@@ -350,8 +353,9 @@ def main():
 
     if global_best_solution is not None:
         print(f"Best configuration: {global_best_name}")
-        print("Best solution (pipe format):")
-        print(format_solution_pipe(global_best_solution))
+        if print_solution_pipe_main:
+            print("Best solution (pipe format):")
+            print(format_solution_pipe(global_best_solution))
 
 
 if __name__ == "__main__":

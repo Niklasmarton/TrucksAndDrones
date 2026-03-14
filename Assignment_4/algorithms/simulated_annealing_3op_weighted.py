@@ -526,6 +526,7 @@ def run_statistics(
     op1_truck_to_drone_bias=None,
     verbose=True,
     return_metrics=False,
+    print_solution_pipe=False,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -684,7 +685,7 @@ def run_statistics(
                 f"t0_mean={t0_mean:.4f}, t0_min={t0_min:.4f}, t0_max={t0_max:.4f}, "
                 f"t0_fallback_runs={t0_fallback_count}/{runs}"
             )
-        if global_best_solution is not None:
+        if print_solution_pipe and global_best_solution is not None:
             print("Solution on pipe format:")
             print(format_solution_pipe(global_best_solution))
         print("Operator contribution stats (aggregated):")
@@ -757,9 +758,11 @@ def main():
     n_customers = instance_data["n_customers"]
     truck_route = [i for i in range(n_customers + 1)] + [0]
     initial_solution = [truck_route, [], []]
-    configs = [
-        ("1", {"op1": 0.5, "op2": 0.2, "op3": 0.3}),
-    ]
+    print_solution_pipe_main = False
+    configs = configs = [
+("OP1 heavy even more balanced", {"op1": 0.643, "op2": 0.319, "op3": 0.038}),
+]
+
 
     summary = []
     global_best_solution = None
@@ -779,6 +782,7 @@ def main():
             operator_weights=weights,
             verbose=True,
             return_metrics=True,
+            print_solution_pipe=print_solution_pipe_main,
         )
         summary.append((name, metrics["average_score"], best_cost, best_solution))
         if best_cost < global_best_cost:
@@ -791,8 +795,9 @@ def main():
         print(f"{name}: average={avg_score}, best={best_cost}")
 
     print(f"Best configuration: {global_best_name}")
-    print("Best solution (pipe format):")
-    print(format_solution_pipe(global_best_solution))
+    if print_solution_pipe_main:
+        print("Best solution (pipe format):")
+        print(format_solution_pipe(global_best_solution))
     plot_solution(
         global_best_solution,
         instance_data,

@@ -67,8 +67,6 @@ def _destroy_size(truck_len):
         return 1
     if n_customers <= 20:
         return 2
-    if n_customers <= 50:
-        return 4
     return 3
 
 
@@ -201,7 +199,7 @@ def operator(current_solution):
 
     # Early phase: keep LNS mostly quiet to let truck-focused operators
     # establish a stronger backbone route first.
-    if _SEARCH_PROGRESS < 0.35 and random.random() < 0.70:
+    if _SEARCH_PROGRESS < 0.25 and random.random() < 0.25:
         return current_solution
 
     candidate = _clone_solution(current_solution)
