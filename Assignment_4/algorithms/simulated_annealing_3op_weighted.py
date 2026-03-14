@@ -15,8 +15,8 @@ for p in (IO_DIR, OPS_DIR, CORE_DIR):
 
 from read_file import read_instance
 import op1_reinsert as op1
-import op8_or_opt3 as op2
-import op6_destroy as op3
+import op2_destroy_repair as op2
+import op3_or_opt as op3
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
 
@@ -308,8 +308,8 @@ def apply_weighted_operator(solution, operator_weights=None):
     if r < w1:
         return op1.operator(solution), "op1_used"
     if r < (w1 + w2):
-        return op2.truck_2opt(solution), "op2_used"
-    return op3.operator(solution), "op3_used"
+        return op2.operator(solution), "op2_used"
+    return op3.truck_2opt(solution), "op3_used"
 
 
 def simulated_annealing(
