@@ -13,7 +13,6 @@ The operator is also biased towards building the truck route early in the run to
 
 I also have explore prob, which gives the operator a diversifying effect where it does not choose the insertion greedily, but randomly. Through testing, this haad good effects on the solutions. 
 """
-
 import random
 from pathlib import Path
 import sys
@@ -26,14 +25,14 @@ from drone_route_utils import build_drone_pair, drone_route_is_feasible
 from operator_context import assert_context_is_set, get_operator_context, set_operator_context
 
 
-# Exploration settings
+                      
 _EXPLORE_PROB = 0.12
 _PAIR_EXPLORE_PROB = 0.10
 _TRUCK_TO_DRONE_BIAS = 0.0
 _SEARCH_PROGRESS = 0.5
 _SYNC_PEN_WEIGHT = 0.15
 
-# Tuning knobs
+              
 _MAX_ATTEMPTS = 5
 _TOP_K_TRUCK_REMOVALS = 4
 _TOP_K_TRUCK_INSERTIONS = 5
@@ -123,7 +122,7 @@ def _candidate_truck_removal_indices(truck):
     scored = [(_truck_removal_gain(truck, idx, truck_times), idx) for idx in indices]
     best = _sample_top_indices(scored, _TOP_K_TRUCK_REMOVALS)
 
-    # Keep some diversity by mixing with all indices
+                                                    
     remaining = [idx for idx in indices if idx not in best]
     random.shuffle(remaining)
     return best + remaining
@@ -137,8 +136,8 @@ def _choose_truck_removal_index(truck):
     if random.random() < _EXPLORE_PROB:
         return random.choice(candidates[: min(len(candidates), 8)])
 
-    # Rank-weighted random over top-k: rank 1 gets weight 1, rank 2 gets 1/2, etc.
-    # Strongly biases toward the best node while still visiting lower-ranked nodes.
+                                                                                  
+                                                                                   
     k = min(_TOP_K_TRUCK_REMOVALS, len(candidates))
     weights = [1.0 / (i + 1) for i in range(k)]
     total = sum(weights)
@@ -180,13 +179,13 @@ def _select_valid_source(solution):
         return valid_sources[0]
 
     if _SEARCH_PROGRESS < 0.35:
-        # Early: truck-first shaping.
+                                     
         truck_pick_prob = 0.22 + 0.18 * _TRUCK_TO_DRONE_BIAS
     elif _SEARCH_PROGRESS < 0.75:
-        # Mid: more mixed assignment.
+                                     
         truck_pick_prob = 0.34 + 0.36 * _TRUCK_TO_DRONE_BIAS
     else:
-        # Late: preserve some truck refinement.
+                                               
         truck_pick_prob = 0.28 + 0.22 * _TRUCK_TO_DRONE_BIAS
 
     if 0 in valid_sources and random.random() < truck_pick_prob:
@@ -195,7 +194,7 @@ def _select_valid_source(solution):
     if random.random() < _EXPLORE_PROB:
         return random.choice(valid_sources)
 
-    # Mild preference to take from the longer drone route, otherwise truck.
+                                                                           
     if 1 in valid_sources or 2 in valid_sources:
         d1_len = len(drone1) if 1 in valid_sources else -1
         d2_len = len(drone2) if 2 in valid_sources else -1
@@ -223,8 +222,8 @@ def _select_insert_target(removal_choice, solution):
         return random.choice(choices)
 
     if removal_choice == 0:
-        # Phase-aware truck->drone pressure:
-        # early lower, mid higher, late moderate.
+                                            
+                                                 
         if _SEARCH_PROGRESS < 0.35:
             truck_to_drone_prob = 0.18 + 0.22 * _TRUCK_TO_DRONE_BIAS
         elif _SEARCH_PROGRESS < 0.75:
@@ -235,7 +234,7 @@ def _select_insert_target(removal_choice, solution):
             return 1 if len(drone1) <= len(drone2) else 2
         return 0
 
-    # Drone source: usually try truck, sometimes swap drone route
+                                                                 
     if _SEARCH_PROGRESS < 0.35:
         truck_insert_prob = 0.85
     elif _SEARCH_PROGRESS < 0.75:
@@ -268,7 +267,7 @@ def _candidate_truck_insertion_indices(truck, removed_value, exclude_index=None)
     scored = []
     for idx in candidate_indices:
         delta = _truck_insertion_delta(truck, idx, removed_value, truck_times)
-        scored.append((-delta, idx))  # smaller delta is better
+        scored.append((-delta, idx))                           
 
     best = _sample_top_indices(scored, _TOP_K_TRUCK_INSERTIONS)
 
@@ -319,7 +318,7 @@ def _drone_pair_score(node, truck, pair):
 
     drone_flight_time = drone_times[launch_node][node] + drone_times[node][land_node]
 
-    # Positive slack is good, negative means likely waiting.
+                                                            
     slack = truck_segment_time - drone_flight_time
     return slack
 
@@ -378,7 +377,7 @@ def _choose_best_drone_insertion(
         if trials >= _MAX_DRONE_INSERTION_TRIALS:
             break
 
-    return best  # (score, insertion_index, pair) or None
+    return best                                          
 
 
 def _attempt_operator_move(current_solution):
@@ -395,7 +394,7 @@ def _attempt_operator_move(current_solution):
     removed_value = None
     original_truck_removal_index = None
 
-    # ----- Remove -----
+                        
     if removal_choice == 0:
         if len(truck) <= 2:
             return None
@@ -419,7 +418,7 @@ def _attempt_operator_move(current_solution):
         removed_tuple = source_route.pop(removal_index)
         removed_value = removed_tuple[0]
 
-    # ----- Insert into truck -----
+                                   
     if insert_choice == 0:
         exclude_index = original_truck_removal_index if removal_choice == 0 else None
         insertion_index = _choose_truck_insertion_index(
@@ -433,14 +432,14 @@ def _attempt_operator_move(current_solution):
         truck.insert(insertion_index, removed_value)
         return new_solution
 
-    # ----- Insert into drone -----
+                                   
     target_route = new_solution[insert_choice]
 
     preferred_pair = None
     preferred_index = None
     if removed_tuple is not None:
         preferred_pair = (removed_tuple[1], removed_tuple[2])
-        # Try roughly same relative position first if reinserting within drone world
+                                                                                    
         if insert_choice == removal_choice:
             preferred_index = removal_index
 
@@ -485,7 +484,7 @@ def _trip_penalty(trip, truck_route, prefix, drone_times):
         or land_idx >= len(truck_route)
         or launch_idx >= land_idx
     ):
-        # Invalid endpoint mapping: treat as a very poor candidate.
+                                                                   
         return 1e9
     launch_node = truck_route[launch_idx]
     land_node = truck_route[land_idx]

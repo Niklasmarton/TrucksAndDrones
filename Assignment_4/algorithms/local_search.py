@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import time
 
-# Ensure this file can import the weighted SA module when run directly.
+                                                                       
 ALG_DIR = Path(__file__).resolve().parent
 if str(ALG_DIR) not in sys.path:
     sys.path.append(str(ALG_DIR))
@@ -39,7 +39,7 @@ def local_search(
     - Select one operator per iteration using the same weighted chooser as SA.
     - Accept only strictly improving feasible moves (delta < 0).
     - Stop when iteration budget is exhausted or no improvement is found for
-      `stall_limit` consecutive iterations.
+      `stall_limit` consecutive iterations.l
     """
     if instance_data is None:
         instance_data = sa_weighted.load_instance()
@@ -130,7 +130,7 @@ def local_search(
         stats[op_name]["feasible"] += 1
         delta_e = new_cost - incumbent_cost
 
-        # Standard hill-climbing acceptance rule: only strictly better moves.
+                                                                             
         if delta_e < 0:
             incumbent = new_solution
             incumbent_cost = new_cost

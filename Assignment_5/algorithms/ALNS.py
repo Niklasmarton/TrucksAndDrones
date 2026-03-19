@@ -1,11 +1,9 @@
 from collections import OrderedDict
 from pathlib import Path
 import sys
-import copy
 import random
 import math
 import time
-import numpy as np
 
 ASSIGNMENT_DIR = Path(__file__).resolve().parents[1]
 IO_DIR = ASSIGNMENT_DIR / "io"
@@ -22,14 +20,12 @@ import op3_or_opt as op3
 from CalCulateTotalArrivalTime import CalCulateTotalArrivalTime
 from FeasibiltyCheck import SolutionFeasibility
 
-try:
-    import matplotlib.pyplot as plt
-except Exception:
-    plt = None
-
-
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
-file_name = "R_100.txt"
+file_name = "F_100.txt"
+
+
+def clone_solution(solution):
+    return [solution[0][:], solution[1][:], solution[2][:]]
 
 
 def load_instance(instance_path=None):
@@ -59,6 +55,12 @@ def configure_operator_context(instance_data):
     op3.set_operator_context(truck_times, drone_times, range_limit, depot_idx)
 
 
+def configure_operator_search_progress(progress):
+    for op in (op1, op2, op3):
+        if hasattr(op, "set_search_progress"):
+            op.set_search_progress(progress)
+
+
 def reset_operator_state():
     if hasattr(op1, "reset_operator_state"):
         op1.reset_operator_state()
@@ -69,6 +71,30 @@ def configure_reinsert_bias(op1_truck_to_drone_bias=None):
         return
     if hasattr(op1, "set_truck_to_drone_bias"):
         op1.set_truck_to_drone_bias(op1_truck_to_drone_bias)
+
+
+def build_evaluator(instance_data):
+    ctx = unpack_instance(instance_data)
+    T = ctx["T"]
+    D = ctx["D"]
+    flight_limit = ctx["flight_limit"]
+    n_customers = ctx["n_customers"]
+    depot = ctx["depot"]
+
+    calc = CalCulateTotalArrivalTime()
+    calc.truck_times = T
+    calc.drone_times = D
+    calc.flight_range = flight_limit
+    calc.depot_index = depot
+
+    checker = SolutionFeasibility(
+        n_nodes=n_customers + 1,
+        n_drones=2,
+        depot_index=depot,
+        drone_times=D,
+        flight_range=flight_limit,
+    )
+    return ctx, calc, checker
 
 
 def to_parts_solution(solution):
@@ -99,111 +125,12 @@ def evaluate_solution(solution, calc, checker):
     return True, total_time
 
 
-def _embed_2d_from_distance_matrix(distance_matrix):
-    """
-    Classical MDS embedding from a distance matrix.
-    Returns Nx2 coordinates for plotting.
-    """
-    d = np.array(distance_matrix, dtype=float)
-    n = d.shape[0]
-    j = np.eye(n) - np.ones((n, n)) / n
-    b = -0.5 * j @ (d ** 2) @ j
-    eigvals, eigvecs = np.linalg.eigh(b)
-    idx = np.argsort(eigvals)[::-1]
-    eigvals = eigvals[idx]
-    eigvecs = eigvecs[:, idx]
-
-    vals = np.maximum(eigvals[:2], 0.0)
-    vecs = eigvecs[:, :2]
-    coords = vecs * np.sqrt(vals)
-    if coords.shape[1] < 2:
-        coords = np.hstack([coords, np.zeros((coords.shape[0], 2 - coords.shape[1]))])
-    return coords
-
-
-def plot_solution(solution, instance_data, title="SA Solution"):
-    """
-    Plot truck route and drone sorties in a separate matplotlib window.
-    """
-    if plt is None:
-        print("Matplotlib not available; skipping plot.")
-        return
-
-    truck, drone1, drone2 = solution
-    coords = _embed_2d_from_distance_matrix(instance_data["truck_times"])
-    depot = instance_data.get("depot_index", 0)
-
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.set_title(title)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-
-    ax.scatter(coords[:, 0], coords[:, 1], s=30, c="black", alpha=0.7)
-    ax.scatter([coords[depot, 0]], [coords[depot, 1]], s=120, c="red", marker="s", label="Depot")
-
-                
-    for i in range(len(truck) - 1):
-        a = truck[i]
-        b = truck[i + 1]
-        ax.plot(
-            [coords[a, 0], coords[b, 0]],
-            [coords[a, 1], coords[b, 1]],
-            color="tab:blue",
-            linewidth=1.8,
-            alpha=0.9,
-        )
-
-                     
-    for node, launch_idx, land_idx in drone1:
-        launch_node = truck[launch_idx]
-        land_node = truck[land_idx]
-        ax.plot(
-            [coords[launch_node, 0], coords[node, 0], coords[land_node, 0]],
-            [coords[launch_node, 1], coords[node, 1], coords[land_node, 1]],
-            color="tab:orange",
-            linestyle="--",
-            linewidth=1.4,
-            alpha=0.8,
-        )
-
-                     
-    for node, launch_idx, land_idx in drone2:
-        launch_node = truck[launch_idx]
-        land_node = truck[land_idx]
-        ax.plot(
-            [coords[launch_node, 0], coords[node, 0], coords[land_node, 0]],
-            [coords[launch_node, 1], coords[node, 1], coords[land_node, 1]],
-            color="tab:green",
-            linestyle="--",
-            linewidth=1.4,
-            alpha=0.8,
-        )
-
-    ax.grid(alpha=0.25)
-    plt.tight_layout()
-    plt.show()
-
-
 def solution_key(solution):
     truck, drone1, drone2 = solution
     return (tuple(truck), tuple(drone1), tuple(drone2))
 
 
-def clone_solution(solution):
-    return [solution[0][:], solution[1][:], solution[2][:]]
-
-
-def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3):
-        if hasattr(op, "set_search_progress"):
-            op.set_search_progress(progress)
-
-
 def fast_precheck_solution(solution, ctx):
-    """
-    Cheap structural/range filter to reject obviously invalid candidates before
-    full feasibility/objective evaluation.
-    """
     truck, drone1, drone2 = solution
     D = ctx["D"]
     flight_limit = ctx["flight_limit"]
@@ -254,65 +181,117 @@ def fast_precheck_solution(solution, ctx):
     return True
 
 
-def apply_weighted_operator(solution):
-    """
-    Equal operator weights: 1/3 each.
-    """
+def format_solution_pipe(solution):
+    parts = to_parts_solution(solution)
+    part1 = ",".join(str(x) for x in parts["part1"])
+    part2 = ",".join(str(x) for x in parts["part2"])
+    part3 = ",".join(str(x) for x in parts["part3"])
+    part4 = ",".join(str(x) for x in parts["part4"])
+    return f"{part1} | {part2} | {part3} | {part4}"
+
+
+def apply_operator(solution, op_name):
+    if op_name == "op1":
+        return op1.operator(solution)
+    if op_name == "op2":
+        return op2.operator(solution)
+    return op3.truck_2opt(solution)
+
+
+def roulette_pick(weights):
     r = random.random()
-    if r < (1.0 / 3.0):
-        return op1.operator(solution), "op1_used"
-    if r < (2.0 / 3.0):
-        return op2.operator(solution), "op2_used"
-    return op3.truck_2opt(solution), "op3_used"
+    acc = 0.0
+    for op_name in ("op1", "op2", "op3"):
+        acc += weights[op_name]
+        if r <= acc:
+            return op_name
+    return "op3"
 
 
-def simulated_annealing(
+def _normalize_weight_dict(weights, min_weight=1e-9):
+    fixed = {k: max(min_weight, float(v)) for k, v in weights.items()}
+    s = sum(fixed.values())
+    return {k: v / s for k, v in fixed.items()}
+
+
+def _escape_perturbation(
+    incumbent,
+    incumbent_cost,
+    best_cost,
+    ctx,
+    cached_evaluate,
+    weights,
+    escape_steps=10,
+):
+    improved_best = False
+    total_applied = 0
+
+    current = incumbent
+    current_cost = incumbent_cost
+
+    for _ in range(escape_steps):
+        op_name = roulette_pick(weights)
+        candidate = apply_operator(current, op_name)
+        if candidate is current or candidate == current:
+            continue
+        if not fast_precheck_solution(candidate, ctx):
+            continue
+        feasible, cand_cost = cached_evaluate(candidate)
+        if not feasible:
+            continue
+
+        current = candidate
+        current_cost = cand_cost
+        total_applied += 1
+
+        if current_cost < best_cost:
+            improved_best = True
+            break
+
+    return current, current_cost, improved_best, total_applied
+
+
+def alns(
     initial_solution,
     instance_data=None,
-    warmup_iterations=100,
-    iterations=9900,
+    warmup_iterations=500,
+    iterations=9500,
     final_temperature=0.1,
     cache_limit=200000,
     op1_truck_to_drone_bias=None,
+    reaction_factor=0.2,
+    segment_length=100,
+    escape_stall_limit=800,
+    escape_steps=10,
     ctx=None,
     calc=None,
     checker=None,
     shared_eval_cache=None,
 ):
-    """
-    Simulated annealing flow aligned with Assignment_3 implementation:
-    - warm-up (100): estimate temperature and accept non-improving with prob 0.8
-    - main phase (9900): metropolis acceptance exp(-DeltaE / T)
-    """
     if instance_data is None:
         instance_data = load_instance()
     if ctx is None or calc is None or checker is None:
-        ctx = unpack_instance(instance_data)
-        T = ctx["T"]
-        D = ctx["D"]
-        flight_limit = ctx["flight_limit"]
-        n_customers = ctx["n_customers"]
-        depot = ctx["depot"]
-
-        calc = CalCulateTotalArrivalTime()
-        calc.truck_times = T
-        calc.drone_times = D
-        calc.flight_range = flight_limit
-        calc.depot_index = depot
-
-        checker = SolutionFeasibility(
-            n_nodes=n_customers + 1,
-            n_drones=2,
-            depot_index=depot,
-            drone_times=D,
-            flight_range=flight_limit,
-        )
+        ctx, calc, checker = build_evaluator(instance_data)
         configure_operator_context(instance_data)
 
     configure_reinsert_bias(op1_truck_to_drone_bias)
     reset_operator_state()
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
+
+    def cached_evaluate(sol):
+        key = solution_key(sol)
+        cached = eval_cache.get(key)
+        if cached is not None:
+            eval_cache.move_to_end(key)
+            return cached
+
+        result = evaluate_solution(sol, calc, checker)
+        eval_cache[key] = result
+        if cache_limit is not None and cache_limit > 0 and len(eval_cache) > cache_limit:
+            eval_cache.popitem(last=False)
+        return result
+
     stats = {
         "op1": {
             "used": 0,
@@ -358,19 +337,6 @@ def simulated_annealing(
         },
     }
 
-    def cached_evaluate(sol):
-        key = solution_key(sol)
-        cached = eval_cache.get(key)
-        if cached is not None:
-            eval_cache.move_to_end(key)
-            return cached
-
-        result = evaluate_solution(sol, calc, checker)
-        eval_cache[key] = result
-        if cache_limit is not None and cache_limit > 0 and len(eval_cache) > cache_limit:
-            eval_cache.popitem(last=False)
-        return result
-
     incumbent = clone_solution(initial_solution)
     incumbent_feasible, incumbent_cost = cached_evaluate(incumbent)
     if not incumbent_feasible:
@@ -378,30 +344,33 @@ def simulated_annealing(
 
     best_solution = clone_solution(incumbent)
     best_cost = incumbent_cost
-    deltas = []
+
     total_steps = max(1, warmup_iterations + iterations)
 
+    deltas = []
     for w in range(warmup_iterations):
         configure_operator_search_progress(w / total_steps)
-        new_solution, op_key = apply_weighted_operator(incumbent)
-        op_name = op_key.split("_")[0]
+        op_name = random.choice(("op1", "op2", "op3"))
         stats[op_name]["used"] += 1
-        if new_solution is incumbent or new_solution == incumbent:
+
+        candidate = apply_operator(incumbent, op_name)
+        if candidate is incumbent or candidate == incumbent:
             continue
-        if not fast_precheck_solution(new_solution, ctx):
+        if not fast_precheck_solution(candidate, ctx):
             continue
-        feasible, new_cost = cached_evaluate(new_solution)
+
+        feasible, cand_cost = cached_evaluate(candidate)
         if not feasible:
             continue
         stats[op_name]["feasible"] += 1
 
-        delta_e = new_cost - incumbent_cost
+        delta_e = cand_cost - incumbent_cost
         if delta_e >= 0:
             deltas.append(delta_e)
 
         if delta_e < 0:
-            incumbent = new_solution
-            incumbent_cost = new_cost
+            incumbent = candidate
+            incumbent_cost = cand_cost
             stats[op_name]["accepted"] += 1
             stats[op_name]["improved"] += 1
             stats[op_name]["delta_sum"] += delta_e
@@ -412,8 +381,8 @@ def simulated_annealing(
         else:
             stats[op_name]["worse_feasible"] += 1
             if random.random() < 0.8:
-                incumbent = new_solution
-                incumbent_cost = new_cost
+                incumbent = candidate
+                incumbent_cost = cand_cost
                 stats[op_name]["accepted"] += 1
                 stats[op_name]["uphill_accepted"] += 1
                 stats[op_name]["delta_sum"] += delta_e
@@ -427,62 +396,136 @@ def simulated_annealing(
     if t0 <= 0:
         t0 = 1.0
         t0_used_fallback = True
-    stats["_meta"] = {
-        "warmup_delta_avg": delta_avg,
-        "warmup_delta_samples": len(deltas),
-        "t0": t0,
-        "t0_used_fallback": t0_used_fallback,
-    }
 
     alpha = (final_temperature / t0) ** (1.0 / iterations) if iterations > 0 else 1.0
     temperature = t0
 
+    weights = {"op1": 1.0 / 3.0, "op2": 1.0 / 3.0, "op3": 1.0 / 3.0}
+    segment_scores = {"op1": 0.0, "op2": 0.0, "op3": 0.0}
+    segment_uses = {"op1": 0, "op2": 0, "op3": 0}
+    segment_feasible_uses = {"op1": 0, "op2": 0, "op3": 0}
+
+    sigma_global_best = 4.0
+    sigma_incumbent_improve = 2.0
+    sigma_feasible = 1.0
+
+    escape_calls = 0
+    escape_steps_applied = 0
+    no_best_improve_steps = 0
+
     for it in range(iterations):
         configure_operator_search_progress((warmup_iterations + it) / total_steps)
-        new_solution, op_key = apply_weighted_operator(incumbent)
-        op_name = op_key.split("_")[0]
+        op_name = roulette_pick(weights)
         stats[op_name]["used"] += 1
-        if new_solution is incumbent or new_solution == incumbent:
-            temperature = alpha * temperature
-            continue
-        if not fast_precheck_solution(new_solution, ctx):
-            temperature = alpha * temperature
-            continue
-        feasible, new_cost = cached_evaluate(new_solution)
-        if feasible:
-            stats[op_name]["feasible"] += 1
-            delta_e = new_cost - incumbent_cost
+        segment_uses[op_name] += 1
 
-            if delta_e < 0:
-                incumbent = new_solution
-                incumbent_cost = new_cost
+        candidate = apply_operator(incumbent, op_name)
+        if candidate is incumbent or candidate == incumbent:
+            temperature = alpha * temperature
+            continue
+        if not fast_precheck_solution(candidate, ctx):
+            temperature = alpha * temperature
+            continue
+
+        feasible, cand_cost = cached_evaluate(candidate)
+        if not feasible:
+            temperature = alpha * temperature
+            continue
+
+        stats[op_name]["feasible"] += 1
+        segment_feasible_uses[op_name] += 1
+        delta_e = cand_cost - incumbent_cost
+
+        accepted = False
+        improved_best = False
+        if delta_e < 0:
+            incumbent = candidate
+            incumbent_cost = cand_cost
+            accepted = True
+            stats[op_name]["accepted"] += 1
+            stats[op_name]["improved"] += 1
+            stats[op_name]["delta_sum"] += delta_e
+            stats[op_name]["improve_delta_sum"] += -delta_e
+
+            if incumbent_cost < best_cost:
+                best_solution = clone_solution(incumbent)
+                best_cost = incumbent_cost
+                improved_best = True
+        else:
+            stats[op_name]["worse_feasible"] += 1
+            p_accept = math.exp(-delta_e / temperature) if temperature > 0 else 0.0
+            stats[op_name]["p_accept_sum"] += p_accept
+            stats[op_name]["p_accept_count"] += 1
+            if random.random() < p_accept:
+                incumbent = candidate
+                incumbent_cost = cand_cost
+                accepted = True
                 stats[op_name]["accepted"] += 1
-                stats[op_name]["improved"] += 1
+                stats[op_name]["uphill_accepted"] += 1
                 stats[op_name]["delta_sum"] += delta_e
-                stats[op_name]["improve_delta_sum"] += -delta_e
-                if incumbent_cost < best_cost:
-                    best_solution = clone_solution(incumbent)
-                    best_cost = incumbent_cost
+                stats[op_name]["uphill_accepted_delta_sum"] += delta_e
             else:
-                stats[op_name]["worse_feasible"] += 1
-                p_accept = math.exp(-delta_e / temperature) if temperature > 0 else 0.0
-                stats[op_name]["p_accept_sum"] += p_accept
-                stats[op_name]["p_accept_count"] += 1
-                if random.random() < p_accept:
-                    incumbent = new_solution
-                    incumbent_cost = new_cost
-                    stats[op_name]["accepted"] += 1
-                    stats[op_name]["uphill_accepted"] += 1
-                    stats[op_name]["delta_sum"] += delta_e
-                    stats[op_name]["uphill_accepted_delta_sum"] += delta_e
+                stats[op_name]["uphill_rejected"] += 1
+
+        if improved_best:
+            segment_scores[op_name] += sigma_global_best
+            no_best_improve_steps = 0
+        elif delta_e < 0:
+            segment_scores[op_name] += sigma_incumbent_improve
+            no_best_improve_steps += 1
+        else:
+            segment_scores[op_name] += sigma_feasible
+            no_best_improve_steps += 1
+
+        if (it + 1) % segment_length == 0:
+            updated = {}
+            for k in ("op1", "op2", "op3"):
+                theta = segment_feasible_uses[k]
+                if theta > 0:
+                    updated[k] = weights[k] * (1.0 - reaction_factor) + reaction_factor * (
+                        segment_scores[k] / theta
+                    )
                 else:
-                    stats[op_name]["uphill_rejected"] += 1
+                    updated[k] = weights[k] * (1.0 - reaction_factor)
+            weights = _normalize_weight_dict(updated)
+            segment_scores = {"op1": 0.0, "op2": 0.0, "op3": 0.0}
+            segment_uses = {"op1": 0, "op2": 0, "op3": 0}
+            segment_feasible_uses = {"op1": 0, "op2": 0, "op3": 0}
+
+        if no_best_improve_steps >= escape_stall_limit:
+            escape_calls += 1
+            incumbent, incumbent_cost, esc_improved_best, steps_applied = _escape_perturbation(
+                incumbent,
+                incumbent_cost,
+                best_cost,
+                ctx,
+                cached_evaluate,
+                weights,
+                escape_steps=escape_steps,
+            )
+            escape_steps_applied += steps_applied
+            if esc_improved_best and incumbent_cost < best_cost:
+                best_solution = clone_solution(incumbent)
+                best_cost = incumbent_cost
+                no_best_improve_steps = 0
+            else:
+                no_best_improve_steps = max(0, escape_stall_limit // 4)
 
         temperature = alpha * temperature
 
     best_parts = to_parts_solution(best_solution)
     assert checker.is_solution_feasible(best_parts)
     assert calc.calculate_total_waiting_time(best_parts)[3]
+
+    stats["_meta"] = {
+        "warmup_delta_avg": delta_avg,
+        "warmup_delta_samples": len(deltas),
+        "t0": t0,
+        "t0_used_fallback": t0_used_fallback,
+        "final_weights": dict(weights),
+        "escape_calls": escape_calls,
+        "escape_steps_applied": escape_steps_applied,
+    }
 
     return best_solution, best_cost, stats
 
@@ -491,36 +534,23 @@ def run_statistics(
     initial_solution,
     instance_data=None,
     runs=10,
-    warmup_iterations=100,
-    iterations=9900,
+    warmup_iterations=500,
+    iterations=9500,
     final_temperature=0.1,
     cache_limit=200000,
+    plot_best_after_all=False,
     op1_truck_to_drone_bias=None,
-    plot_best_after_all=True,
+    reaction_factor=0.2,
+    segment_length=100,
+    escape_stall_limit=800,
+    escape_steps=10,
     verbose=True,
     return_metrics=False,
-    print_solution_pipe=False,
+    print_solution_pipe=True,
 ):
     if instance_data is None:
         instance_data = load_instance()
-    ctx = unpack_instance(instance_data)
-    T = ctx["T"]
-    D = ctx["D"]
-    flight_limit = ctx["flight_limit"]
-    n_customers = ctx["n_customers"]
-    depot = ctx["depot"]
-    calc = CalCulateTotalArrivalTime()
-    calc.truck_times = T
-    calc.drone_times = D
-    calc.flight_range = flight_limit
-    calc.depot_index = depot
-    checker = SolutionFeasibility(
-        n_nodes=n_customers + 1,
-        n_drones=2,
-        depot_index=depot,
-        drone_times=D,
-        flight_range=flight_limit,
-    )
+    ctx, calc, checker = build_evaluator(instance_data)
     configure_operator_context(instance_data)
     configure_reinsert_bias(op1_truck_to_drone_bias)
 
@@ -533,8 +563,9 @@ def run_statistics(
     global_best_solution = None
     global_best_cost = float("inf")
     shared_eval_cache = OrderedDict()
+
     aggregate_stats = {
-        "op1": {
+        op_name: {
             "used": 0,
             "feasible": 0,
             "accepted": 0,
@@ -547,44 +578,21 @@ def run_statistics(
             "uphill_accepted_delta_sum": 0.0,
             "p_accept_sum": 0.0,
             "p_accept_count": 0,
-        },
-        "op2": {
-            "used": 0,
-            "feasible": 0,
-            "accepted": 0,
-            "improved": 0,
-            "uphill_accepted": 0,
-            "uphill_rejected": 0,
-            "worse_feasible": 0,
-            "delta_sum": 0.0,
-            "improve_delta_sum": 0.0,
-            "uphill_accepted_delta_sum": 0.0,
-            "p_accept_sum": 0.0,
-            "p_accept_count": 0,
-        },
-        "op3": {
-            "used": 0,
-            "feasible": 0,
-            "accepted": 0,
-            "improved": 0,
-            "uphill_accepted": 0,
-            "uphill_rejected": 0,
-            "worse_feasible": 0,
-            "delta_sum": 0.0,
-            "improve_delta_sum": 0.0,
-            "uphill_accepted_delta_sum": 0.0,
-            "p_accept_sum": 0.0,
-            "p_accept_count": 0,
-        },
+        }
+        for op_name in ("op1", "op2", "op3")
     }
+
     warmup_delta_avgs = []
     warmup_delta_samples = []
     t0_values = []
     t0_fallback_count = 0
+    final_weights_acc = {"op1": 0.0, "op2": 0.0, "op3": 0.0}
+    total_escape_calls = 0
+    total_escape_steps = 0
 
     for run_id in range(runs):
         start = time.perf_counter()
-        best_solution, best_cost, op_stats = simulated_annealing(
+        best_solution, best_cost, op_stats = alns(
             clone_solution(initial_solution),
             instance_data=instance_data,
             warmup_iterations=warmup_iterations,
@@ -592,27 +600,21 @@ def run_statistics(
             final_temperature=final_temperature,
             cache_limit=cache_limit,
             op1_truck_to_drone_bias=op1_truck_to_drone_bias,
+            reaction_factor=reaction_factor,
+            segment_length=segment_length,
+            escape_stall_limit=escape_stall_limit,
+            escape_steps=escape_steps,
             ctx=ctx,
             calc=calc,
             checker=checker,
             shared_eval_cache=shared_eval_cache,
         )
         elapsed = time.perf_counter() - start
+
         for op_name in ("op1", "op2", "op3"):
-            aggregate_stats[op_name]["used"] += op_stats[op_name]["used"]
-            aggregate_stats[op_name]["feasible"] += op_stats[op_name]["feasible"]
-            aggregate_stats[op_name]["accepted"] += op_stats[op_name]["accepted"]
-            aggregate_stats[op_name]["improved"] += op_stats[op_name]["improved"]
-            aggregate_stats[op_name]["uphill_accepted"] += op_stats[op_name]["uphill_accepted"]
-            aggregate_stats[op_name]["uphill_rejected"] += op_stats[op_name]["uphill_rejected"]
-            aggregate_stats[op_name]["worse_feasible"] += op_stats[op_name]["worse_feasible"]
-            aggregate_stats[op_name]["delta_sum"] += op_stats[op_name]["delta_sum"]
-            aggregate_stats[op_name]["improve_delta_sum"] += op_stats[op_name]["improve_delta_sum"]
-            aggregate_stats[op_name]["uphill_accepted_delta_sum"] += op_stats[op_name][
-                "uphill_accepted_delta_sum"
-            ]
-            aggregate_stats[op_name]["p_accept_sum"] += op_stats[op_name]["p_accept_sum"]
-            aggregate_stats[op_name]["p_accept_count"] += op_stats[op_name]["p_accept_count"]
+            for k in aggregate_stats[op_name]:
+                aggregate_stats[op_name][k] += op_stats[op_name][k]
+
         run_meta = op_stats.get("_meta")
         if run_meta is not None:
             warmup_delta_avgs.append(run_meta.get("warmup_delta_avg", 0.0))
@@ -620,6 +622,11 @@ def run_statistics(
             t0_values.append(run_meta.get("t0", 0.0))
             if run_meta.get("t0_used_fallback", False):
                 t0_fallback_count += 1
+            fw = run_meta.get("final_weights", {})
+            for k in ("op1", "op2", "op3"):
+                final_weights_acc[k] += float(fw.get(k, 0.0))
+            total_escape_calls += int(run_meta.get("escape_calls", 0))
+            total_escape_steps += int(run_meta.get("escape_steps_applied", 0))
 
         run_costs.append(best_cost)
         run_times.append(elapsed)
@@ -637,6 +644,8 @@ def run_statistics(
     improvement_pct = (improvement_abs / init_cost * 100.0) if init_cost > 0 else 0.0
     avg_runtime_per_run = sum(run_times) / len(run_times)
 
+    avg_final_weights = {k: (final_weights_acc[k] / runs if runs > 0 else 0.0) for k in final_weights_acc}
+
     metrics = {
         "initial_score": init_cost,
         "average_score": avg_obj,
@@ -652,6 +661,9 @@ def run_statistics(
         ),
         "t0_mean": (sum(t0_values) / len(t0_values) if t0_values else 0.0),
         "t0_fallback_runs": t0_fallback_count,
+        "avg_final_weights": avg_final_weights,
+        "escape_calls": total_escape_calls,
+        "escape_steps": total_escape_steps,
     }
 
     if verbose:
@@ -663,33 +675,35 @@ def run_statistics(
             f"({improvement_pct:.2f}% reduction)"
         )
         if t0_values:
-            warmup_delta_avg_mean = sum(warmup_delta_avgs) / len(warmup_delta_avgs)
-            warmup_samples_mean = sum(warmup_delta_samples) / len(warmup_delta_samples)
-            t0_mean = sum(t0_values) / len(t0_values)
-            t0_min = min(t0_values)
-            t0_max = max(t0_values)
             print(
                 "SA temperature diagnostics: "
-                f"warmup_delta_avg_mean={warmup_delta_avg_mean:.4f}, "
-                f"warmup_samples_mean={warmup_samples_mean:.1f}, "
-                f"t0_mean={t0_mean:.4f}, t0_min={t0_min:.4f}, t0_max={t0_max:.4f}, "
+                f"warmup_delta_avg_mean={sum(warmup_delta_avgs)/len(warmup_delta_avgs):.4f}, "
+                f"warmup_samples_mean={sum(warmup_delta_samples)/len(warmup_delta_samples):.1f}, "
+                f"t0_mean={sum(t0_values)/len(t0_values):.4f}, "
+                f"t0_min={min(t0_values):.4f}, t0_max={max(t0_values):.4f}, "
                 f"t0_fallback_runs={t0_fallback_count}/{runs}"
             )
+        print(
+            "ALNS adaptation diagnostics: "
+            f"avg_final_weights=(op1={avg_final_weights['op1']:.3f}, "
+            f"op2={avg_final_weights['op2']:.3f}, op3={avg_final_weights['op3']:.3f}), "
+            f"escape_calls={total_escape_calls}, escape_steps={total_escape_steps}"
+        )
         if print_solution_pipe and global_best_solution is not None:
             print("Solution on pipe format:")
             print(format_solution_pipe(global_best_solution))
+
         print("Operator contribution stats (aggregated):")
         for op_name in ("op1", "op2", "op3"):
-            used = aggregate_stats[op_name]["used"]
-            feasible_moves = aggregate_stats[op_name]["feasible"]
-            accepted = aggregate_stats[op_name]["accepted"]
-            improved = aggregate_stats[op_name]["improved"]
-            uphill_accepted = aggregate_stats[op_name]["uphill_accepted"]
-            uphill_rejected = aggregate_stats[op_name]["uphill_rejected"]
-            worse_feasible = aggregate_stats[op_name]["worse_feasible"]
-            avg_delta = (
-                aggregate_stats[op_name]["delta_sum"] / accepted if accepted > 0 else float("nan")
-            )
+            s = aggregate_stats[op_name]
+            used = s["used"]
+            feasible_moves = s["feasible"]
+            accepted = s["accepted"]
+            improved = s["improved"]
+            uphill_accepted = s["uphill_accepted"]
+            uphill_rejected = s["uphill_rejected"]
+            worse_feasible = s["worse_feasible"]
+            avg_delta = s["delta_sum"] / accepted if accepted > 0 else float("nan")
             feasible_rate = (feasible_moves / used * 100.0) if used > 0 else 0.0
             accept_rate = (accepted / feasible_moves * 100.0) if feasible_moves > 0 else 0.0
             improve_rate = (improved / accepted * 100.0) if accepted > 0 else 0.0
@@ -698,18 +712,11 @@ def run_statistics(
                 uphill_accepted / worse_feasible * 100.0 if worse_feasible > 0 else 0.0
             )
             avg_uphill_accepted_delta = (
-                aggregate_stats[op_name]["uphill_accepted_delta_sum"] / uphill_accepted
-                if uphill_accepted > 0
-                else float("nan")
+                s["uphill_accepted_delta_sum"] / uphill_accepted if uphill_accepted > 0 else float("nan")
             )
-            mean_p_accept = (
-                aggregate_stats[op_name]["p_accept_sum"] / aggregate_stats[op_name]["p_accept_count"]
-                if aggregate_stats[op_name]["p_accept_count"] > 0
-                else float("nan")
-            )
-            improve_per_1k_uses = (
-                aggregate_stats[op_name]["improve_delta_sum"] * 1000.0 / used if used > 0 else 0.0
-            )
+            mean_p_accept = s["p_accept_sum"] / s["p_accept_count"] if s["p_accept_count"] > 0 else float("nan")
+            improve_per_1k_uses = (s["improve_delta_sum"] * 1000.0 / used) if used > 0 else 0.0
+
             print(
                 f"  {op_name}: used={used}, feasible={feasible_moves} ({feasible_rate:.1f}%), "
                 f"accepted={accepted} ({accept_rate:.1f}%), improved={improved} ({improve_rate:.1f}%), "
@@ -720,47 +727,34 @@ def run_statistics(
                 f"avg_accepted_delta={avg_delta:.4f}, improve_per_1000_uses={improve_per_1k_uses:.2f}"
             )
 
-    if plot_best_after_all and global_best_solution is not None:
-        plot_solution(
-            global_best_solution,
-            instance_data,
-            title=f"Best Solution After {runs} Runs (score: {global_best_cost})",
-        )
-
     if return_metrics:
         return global_best_solution, global_best_cost, metrics
     return global_best_solution, global_best_cost
 
 
-def format_solution_pipe(solution):
-    parts = to_parts_solution(solution)
-    part1 = ",".join(str(x) for x in parts["part1"])
-    part2 = ",".join(str(x) for x in parts["part2"])
-    part3 = ",".join(str(x) for x in parts["part3"])
-    part4 = ",".join(str(x) for x in parts["part4"])
-    return f"{part1} | {part2} | {part3} | {part4}"
-
-
 def main():
     instance_data = load_instance()
     n_customers = instance_data["n_customers"]
-
     truck_route = [i for i in range(n_customers + 1)] + [0]
     initial_solution = [truck_route, [], []]
 
-    best_solution, best_cost = run_statistics(
+    run_statistics(
         initial_solution,
         instance_data=instance_data,
         runs=10,
-        warmup_iterations=100,
-        iterations=9900,
+        warmup_iterations=500,
+        iterations=9500,
         final_temperature=0.1,
         cache_limit=200000,
+        op1_truck_to_drone_bias=None,
+        reaction_factor=0.2,
+        segment_length=100,
+        escape_stall_limit=800,
+        escape_steps=10,
+        verbose=True,
+        return_metrics=False,
         print_solution_pipe=True,
-        plot_best_after_all=True,
     )
-    print(f"Best solution after all runs: {best_solution}")
-    print(f"Best solution (pipe format, checker 1-based): {format_solution_pipe(best_solution)}")
 
 
 if __name__ == "__main__":

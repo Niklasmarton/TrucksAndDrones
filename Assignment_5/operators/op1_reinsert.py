@@ -30,7 +30,6 @@ from operator_context import assert_context_is_set, get_operator_context, set_op
 _EXPLORE_PROB = 0.12
 _PAIR_EXPLORE_PROB = 0.10
 _TRUCK_TO_DRONE_BIAS = 0.0
-_SEARCH_PROGRESS = 0.5
 _SYNC_PEN_WEIGHT = 0.15
 
 # Tuning knobs
@@ -58,8 +57,7 @@ def set_truck_to_drone_bias(bias):
 
 
 def set_search_progress(progress):
-    global _SEARCH_PROGRESS
-    _SEARCH_PROGRESS = _clamp01(progress)
+    pass
 
 
 def _clone_solution(solution):
@@ -179,15 +177,7 @@ def _select_valid_source(solution):
     if len(valid_sources) == 1:
         return valid_sources[0]
 
-    if _SEARCH_PROGRESS < 0.35:
-        # Early: truck-first shaping.
-        truck_pick_prob = 0.22 + 0.18 * _TRUCK_TO_DRONE_BIAS
-    elif _SEARCH_PROGRESS < 0.75:
-        # Mid: more mixed assignment.
-        truck_pick_prob = 0.34 + 0.36 * _TRUCK_TO_DRONE_BIAS
-    else:
-        # Late: preserve some truck refinement.
-        truck_pick_prob = 0.28 + 0.22 * _TRUCK_TO_DRONE_BIAS
+    truck_pick_prob = 0.34 + 0.36 * _TRUCK_TO_DRONE_BIAS
 
     if 0 in valid_sources and random.random() < truck_pick_prob:
         return 0
@@ -223,25 +213,13 @@ def _select_insert_target(removal_choice, solution):
         return random.choice(choices)
 
     if removal_choice == 0:
-        # Phase-aware truck->drone pressure:
-        # early lower, mid higher, late moderate.
-        if _SEARCH_PROGRESS < 0.35:
-            truck_to_drone_prob = 0.18 + 0.22 * _TRUCK_TO_DRONE_BIAS
-        elif _SEARCH_PROGRESS < 0.75:
-            truck_to_drone_prob = 0.34 + 0.40 * _TRUCK_TO_DRONE_BIAS
-        else:
-            truck_to_drone_prob = 0.24 + 0.26 * _TRUCK_TO_DRONE_BIAS
+        truck_to_drone_prob = 0.34 + 0.40 * _TRUCK_TO_DRONE_BIAS
         if random.random() < truck_to_drone_prob:
             return 1 if len(drone1) <= len(drone2) else 2
         return 0
 
     # Drone source: usually try truck, sometimes swap drone route
-    if _SEARCH_PROGRESS < 0.35:
-        truck_insert_prob = 0.85
-    elif _SEARCH_PROGRESS < 0.75:
-        truck_insert_prob = 0.70
-    else:
-        truck_insert_prob = 0.78
+    truck_insert_prob = 0.70
     if random.random() < truck_insert_prob:
         return 0
     return 2 if removal_choice == 1 else 1
@@ -529,12 +507,7 @@ def operator(current_solution):
         return current_solution
 
     candidates.sort(key=lambda x: x[0])
-    if _SEARCH_PROGRESS < 0.35:
-        explore_pick_prob = 0.14
-    elif _SEARCH_PROGRESS < 0.75:
-        explore_pick_prob = 0.20
-    else:
-        explore_pick_prob = 0.08
+    explore_pick_prob = 0.14
     if random.random() < explore_pick_prob:
         return random.choice(candidates[: min(3, len(candidates))])[1]
     return candidates[0][1]

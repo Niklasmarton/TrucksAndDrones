@@ -29,7 +29,6 @@ from drone_route_utils import build_drone_pair, drone_route_is_feasible
 from operator_context import assert_context_is_set, get_operator_context, set_operator_context
 
 _EXPLORE_PROB = 0.15
-_SEARCH_PROGRESS = 0.5
 
 
 def _clamp01(value):
@@ -37,12 +36,21 @@ def _clamp01(value):
 
 
 def set_search_progress(progress):
-    global _SEARCH_PROGRESS
-    _SEARCH_PROGRESS = _clamp01(progress)
+    pass
 
 
 def _clone_solution(solution):
     return [solution[0][:], solution[1][:], solution[2][:]]
+
+
+def _rank_biased_pick(candidates, top_k):
+    if not candidates:
+        return None
+    k = min(top_k, len(candidates))
+    if k <= 1:
+        return candidates[0]
+    weights = [k - i for i in range(k)]
+    return random.choices(candidates[:k], weights=weights, k=1)[0]
 
 
 def _route_endpoint_unique(route):
@@ -110,17 +118,22 @@ def _pick_destroy_indices(truck, drone1, drone2, truck_times, depot, count):
     pool_size = min(len(scored), max(count, 3 * count))
     pool = scored[:pool_size]
     if random.random() < _EXPLORE_PROB:
-        random.shuffle(pool)
+        prefix_k = min(len(pool), max(count * 2, count + 1))
+        prefix = pool[:prefix_k]
+        random.shuffle(prefix)
+        pool[:prefix_k] = prefix
 
     chosen = []
-    used_idx = set()
-    for _, idx in pool:
-        if idx in used_idx:
-            continue
-        chosen.append(idx)
-        used_idx.add(idx)
-        if len(chosen) >= count:
+    work = pool[:]
+    top_k = min(len(work), max(count * 2, 4))
+    while work and len(chosen) < count:
+        picked = _rank_biased_pick(work, top_k=top_k)
+        if picked is None:
             break
+        _, idx = picked
+        chosen.append(idx)
+        work.remove(picked)
+        top_k = min(len(work), max(count * 2, 4))
     return sorted(chosen)
 
 
@@ -218,9 +231,6 @@ def operator(current_solution):
 
                                                                        
                                                 
-    if _SEARCH_PROGRESS < 0.25 and random.random() < 0.25:
-        return current_solution
-
     candidate = _clone_solution(current_solution)
     truck, drone1, drone2 = candidate
     if len(truck) <= 4:
@@ -248,7 +258,10 @@ def operator(current_solution):
         use_drone = False
         if drone_candidates:
             drone_candidates.sort(key=lambda x: x[0])
-            best_drone_score, best_route_id, best_new_target = drone_candidates[0]
+            chosen_drone = drone_candidates[0]
+            if random.random() < _EXPLORE_PROB:
+                chosen_drone = _rank_biased_pick(drone_candidates, top_k=4)
+            best_drone_score, best_route_id, best_new_target = chosen_drone
             threshold = truck_delta if truck_delta is not None else float("inf")
             if best_drone_score < threshold or random.random() < _EXPLORE_PROB:
                 use_drone = True

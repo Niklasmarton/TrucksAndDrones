@@ -1,29 +1,3 @@
-"""
-This operator is an Or-opt based truck-route improvement operator.
-
-It relocates short contiguous truck segments (length 1-3) to new positions in the truck route, while keeping the drone routes consistent with the updated truck sequence.
-
-The idea was to create a stronger intensification operator than simple single-node reinsertion: it can move small route blocks and therefore improve the truck backbone more effectively. This helps remove poor local edge structures and improve the overall visit order without fully destroying the solution.
-
-For move generation, the operator evaluates many candidate segment relocations and computes their truck-side delta. It keeps the most promising candidates, but still includes exploration so it does not always test exactly the same move pattern.
-
-After a truck relocation, drone routes are remapped to the new truck indices. If remapping creates infeasibility, the operator attempts route repair; if repair fails, the candidate is discarded. This keeps the move aggressive but still feasibility-safe.
-
-Candidate scoring combines:
-
-- truck relocation delta (primary),
-- synchronization penalty change for drone sorties (secondary).
-
-So even though the move is truck-focused, it still accounts for truck-drone interaction quality before selection.
-
-The final move is chosen greedily among feasible scored candidates (with optional exploration among top candidates). This gives a balance between reliable improvement and enough diversification to avoid repeatedly applying identical local changes.
-
-The operator is phase-aware:
-
-earlier in the run it allows slightly broader segment lengths (including length 3) to reshape structure,
-later it focuses more on shorter relocations for refinement.
-"""
-
 import random
 from pathlib import Path
 import sys
@@ -58,7 +32,7 @@ def _clone_solution(solution):
 
 
 def _search_budget(truck_len):
-    # Bound candidate checks while keeping enough breadth on larger instances.
+                                                                              
     return max(24, min(96, 2 * truck_len))
 
 
@@ -154,7 +128,7 @@ def _candidate_moves(truck, truck_times):
 
             local = []
             for ins_idx in range(1, len(reduced)):
-                # Reinserting at the original index produces the same route.
+                                                                            
                 if ins_idx == start:
                     continue
                 delta = _insertion_delta(reduced, ins_idx, segment, removal_gain, truck_times)

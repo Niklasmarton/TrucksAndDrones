@@ -41,7 +41,9 @@ from operator_context import assert_context_is_set, get_operator_context, set_op
 
 _EXPLORE_PROB = 0.12
 _SYNC_PEN_WEIGHT = 0.10
-_SEARCH_PROGRESS = 0.5
+_TABU_TENURE = 30
+_TABU_UNTIL = {}
+_MOVE_TICK = 0
 
 
 def _clamp01(value):
@@ -49,8 +51,7 @@ def _clamp01(value):
 
 
 def set_search_progress(progress):
-    global _SEARCH_PROGRESS
-    _SEARCH_PROGRESS = _clamp01(progress)
+    pass
 
 
 def _clone_solution(solution):
@@ -60,6 +61,28 @@ def _clone_solution(solution):
 def _search_budget(truck_len):
     # Bound candidate checks while keeping enough breadth on larger instances.
     return max(24, min(96, 2 * truck_len))
+
+
+def _tabu_prune():
+    expired = [k for k, until in _TABU_UNTIL.items() if until <= _MOVE_TICK]
+    for k in expired:
+        _TABU_UNTIL.pop(k, None)
+
+
+def _move_key(start, seg_len, ins_idx):
+    return (int(start), int(seg_len), int(ins_idx))
+
+
+def _is_tabu(start, seg_len, ins_idx):
+    return _TABU_UNTIL.get(_move_key(start, seg_len, ins_idx), -1) > _MOVE_TICK
+
+
+def _register_tabu(start, seg_len, ins_idx):
+    until = _MOVE_TICK + _TABU_TENURE
+    key = _move_key(start, seg_len, ins_idx)
+    inv_key = _move_key(ins_idx, seg_len, start)
+    _TABU_UNTIL[key] = until
+    _TABU_UNTIL[inv_key] = until
 
 
 def _prefix_truck_times(truck_route, truck_times):
@@ -137,12 +160,7 @@ def _candidate_moves(truck, truck_times):
         return []
 
     moves = []
-    if _SEARCH_PROGRESS < 0.35:
-        seg_lengths = (1, 2, 3)
-    elif _SEARCH_PROGRESS < 0.75:
-        seg_lengths = (1, 2, 3) if random.random() < 0.55 else (1, 2)
-    else:
-        seg_lengths = (1, 2)
+    seg_lengths = (1, 2, 3) if random.random() < 0.55 else (1, 2)
 
     for seg_len in seg_lengths:
         if n - 2 <= seg_len:
@@ -181,6 +199,10 @@ def truck_2opt(solution):
     Compatibility entrypoint for the SA framework:
     replaces classical 2-opt with Or-opt(1,2) segment relocation.
     """
+    global _MOVE_TICK
+    _MOVE_TICK += 1
+    _tabu_prune()
+
     assert_context_is_set()
     sol = _clone_solution(solution)
     old_truck = sol[0]
@@ -194,6 +216,8 @@ def truck_2opt(solution):
     budget = _search_budget(len(old_truck))
     feasible_candidates = []
     for delta, start, seg_len, ins_idx in moves[:budget]:
+        if _is_tabu(start, seg_len, ins_idx):
+            continue
         new_truck = _apply_oropt_move(old_truck, start, seg_len, ins_idx)
         if new_truck is None or new_truck == old_truck:
             continue
@@ -217,7 +241,7 @@ def truck_2opt(solution):
 
         new_penalty = _solution_penalty(new_truck, drone1_new, drone2_new, truck_times, drone_times)
         score = delta + _SYNC_PEN_WEIGHT * (new_penalty - current_penalty)
-        feasible_candidates.append((score, [new_truck, drone1_new, drone2_new]))
+        feasible_candidates.append((score, start, seg_len, ins_idx, [new_truck, drone1_new, drone2_new]))
         if len(feasible_candidates) >= 20:
             break
 
@@ -225,7 +249,11 @@ def truck_2opt(solution):
         return solution
 
     feasible_candidates.sort(key=lambda x: x[0])
+    chosen = feasible_candidates[0]
     if random.random() < _EXPLORE_PROB:
         top_k = min(4, len(feasible_candidates))
-        return random.choice(feasible_candidates[:top_k])[1]
-    return feasible_candidates[0][1]
+        chosen = random.choice(feasible_candidates[:top_k])
+
+    _, start, seg_len, ins_idx, candidate_solution = chosen
+    _register_tabu(start, seg_len, ins_idx)
+    return candidate_solution
