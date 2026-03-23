@@ -6,6 +6,7 @@ from . import (
     op5_drone_random,
     op6_truck_random,
     op7_truck_swap,
+    op8_related_destroy,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "op5_drone_random",
     "op6_truck_random",
     "op7_truck_swap",
+    "op8_related_destroy",
 ]

@@ -29,6 +29,7 @@ from drone_route_utils import build_drone_pair, drone_route_is_feasible
 from operator_context import assert_context_is_set, get_operator_context, set_operator_context
 
 _EXPLORE_PROB = 0.15
+_SEARCH_PROGRESS = 0.5
 
 
 def _clamp01(value):
@@ -36,7 +37,8 @@ def _clamp01(value):
 
 
 def set_search_progress(progress):
-    pass
+    global _SEARCH_PROGRESS
+    _SEARCH_PROGRESS = _clamp01(progress)
 
 
 def _clone_solution(solution):
@@ -263,8 +265,15 @@ def operator(current_solution):
                 chosen_drone = _rank_biased_pick(drone_candidates, top_k=4)
             best_drone_score, best_route_id, best_new_target = chosen_drone
             threshold = truck_delta if truck_delta is not None else float("inf")
-            if best_drone_score < threshold or random.random() < _EXPLORE_PROB:
-                use_drone = True
+            # Early phase is intentionally truck-centric; allow drone repair mostly later.
+            if _SEARCH_PROGRESS < 0.15:
+                use_drone = (best_drone_score + 120.0 < threshold) and (random.random() < 0.04)
+            elif _SEARCH_PROGRESS < 0.35:
+                use_drone = (best_drone_score + 60.0 < threshold) and (random.random() < 0.15)
+            elif _SEARCH_PROGRESS < 0.60:
+                use_drone = best_drone_score < threshold or random.random() < (0.55 * _EXPLORE_PROB)
+            else:
+                use_drone = best_drone_score < threshold or random.random() < _EXPLORE_PROB
 
         if use_drone:
             if best_route_id == 1:

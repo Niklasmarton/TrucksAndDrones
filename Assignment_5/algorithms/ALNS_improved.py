@@ -5,6 +5,7 @@ import random
 import math
 import time
 import json
+import re
 
 ASSIGNMENT_DIR = Path(__file__).resolve().parents[1]
 IO_DIR = ASSIGNMENT_DIR / "io"
@@ -22,9 +23,10 @@ import op1_reinsert as op1
 import op2_destroy_repair as op2
 import op3_or_opt as op3
 import op4_drone_retiming as op4
+import op8_related_destroy as op8
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
-file_name = "F_100.txt"
+file_name = "R_100.txt"
 
 
 def clone_solution(solution):
@@ -52,13 +54,13 @@ def configure_operator_context(instance_data):
     D = instance_data["drone_times"]
     fr = instance_data["flight_limit"]
     depot = instance_data.get("depot_index", 0)
-    for op in (op1, op2, op3, op4):
+    for op in (op1, op2, op3, op4, op8):
         if hasattr(op, "set_operator_context"):
             op.set_operator_context(T, D, fr, depot)
 
 
 def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3, op4):
+    for op in (op1, op2, op3, op4, op8):
         if hasattr(op, "set_search_progress"):
             op.set_search_progress(progress)
 
@@ -186,6 +188,107 @@ def _snapshot_record(iter_idx, phase, op_name, incumbent_cost, best_cost, soluti
     }
 
 
+def _plot_operator_deltas(delta_points_by_op, op_names, output_dir, instance_label, run_label):
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return []
+
+    safe_instance = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(instance_label))
+    safe_run = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_label))
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    for op_name in op_names:
+        points = delta_points_by_op.get(op_name, [])
+        if not points:
+            continue
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.scatter(xs, ys, s=10, alpha=0.6, color="tab:blue")
+        ax.axhline(0.0, color="black", linewidth=1.0, alpha=0.7)
+        ax.set_title(f"Operator {op_name} Delta Values ({instance_label}, {run_label})")
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Delta Objective (new - incumbent)")
+        ax.grid(alpha=0.25)
+        plt.tight_layout()
+
+        out_file = out_dir / f"delta_scatter_{safe_instance}_{safe_run}_{op_name}.png"
+        fig.savefig(out_file, dpi=150)
+        plt.close(fig)
+        saved.append(str(out_file))
+
+    return saved
+
+
+def _plot_operator_weights(weight_history, op_names, output_dir, instance_label, run_label):
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return ""
+
+    if not weight_history:
+        return ""
+
+    safe_instance = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(instance_label))
+    safe_run = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_label))
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    segments = list(range(1, len(weight_history) + 1))
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for op_name in op_names:
+        ys = [float(w.get(op_name, 0.0)) for _, w in weight_history]
+        ax.plot(segments, ys, marker="o", linewidth=1.5, markersize=3, label=op_name)
+
+    ax.set_title(f"Operator Weights by Segment ({instance_label}, {run_label})")
+    ax.set_xlabel("Segment Number")
+    ax.set_ylabel("Operator Weight")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(alpha=0.25)
+    ax.legend()
+    plt.tight_layout()
+
+    out_file = out_dir / f"operator_weights_{safe_instance}_{safe_run}.png"
+    fig.savefig(out_file, dpi=150)
+    plt.close(fig)
+    return str(out_file)
+
+
+def _plot_temperature_history(temperature_history, output_dir, instance_label, run_label):
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return ""
+
+    if not temperature_history:
+        return ""
+
+    safe_instance = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(instance_label))
+    safe_run = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_label))
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    xs = [int(p[0]) for p in temperature_history]
+    ys = [float(p[1]) for p in temperature_history]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(xs, ys, linewidth=1.6, color="tab:red")
+    ax.set_title(f"Temperature Across Iterations ({instance_label}, {run_label})")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Temperature")
+    ax.grid(alpha=0.25)
+    plt.tight_layout()
+
+    out_file = out_dir / f"temperature_plot_{safe_instance}_{safe_run}.png"
+    fig.savefig(out_file, dpi=150)
+    plt.close(fig)
+    return str(out_file)
+
+
 def _init_stats(op_names):
     return {
         op_name: {
@@ -258,6 +361,8 @@ def apply_main_operator(solution, op_name):
         return op2.operator(solution)
     if op_name == "op3":
         return op3.operator(solution)
+    if op_name == "op8":
+        return op8.operator(solution)
     return op4.operator(solution)
 
 
@@ -419,8 +524,8 @@ def alns_improved(
     iterations=9500,
     final_temperature=0.1,
     cache_limit=200000,
-    reaction_factor=0.15,
-    segment_length=100,
+    reaction_factor=0.08,
+    segment_length=200,
     escape_stall_limit=500,
     ctx=None,
     calc=None,
@@ -428,9 +533,12 @@ def alns_improved(
     shared_eval_cache=None,
     snapshot_on_accepted=False,
     snapshot_accept_stride=1,
-    min_reward_improvement=70,
-    reward_delta_norm=500.0,
-    reward_delta_cap=6.0,
+    snapshot_every_iteration=False,
+    snapshot_iteration_stride=25,
+    reward_improve_threshold=50.0,
+    warmup_delta_trim_quantile=0.9,
+    collect_delta_points=False,
+    collect_temperature_history=False,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -438,7 +546,7 @@ def alns_improved(
         ctx, calc, checker = build_evaluator(instance_data)
         configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op4"]
+    op_names = ["op1", "op2", "op3", "op8"]
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
 
@@ -464,13 +572,17 @@ def alns_improved(
 
     best_solution = clone_solution(incumbent)
     best_cost = incumbent_cost
+    best_found_iteration = 0
 
     total_steps = max(1, warmup_iterations + iterations)
     accepted_snapshots = []
+    periodic_snapshots = []
     snapshot_accept_stride = max(1, int(snapshot_accept_stride))
+    snapshot_iteration_stride = max(1, int(snapshot_iteration_stride))
     accepted_counter = 0
 
     deltas = []
+    delta_points = {k: [] for k in op_names}
     for w in range(warmup_iterations):
         configure_operator_search_progress(w / total_steps)
         op_name = random.choice(op_names)
@@ -488,6 +600,19 @@ def alns_improved(
 
         stats[op_name]["feasible"] += 1
         delta_e = cand_cost - incumbent_cost
+        if collect_delta_points:
+            delta_points[op_name].append((w + 1, float(delta_e)))
+        if snapshot_every_iteration and ((w + 1) % snapshot_iteration_stride == 0):
+            periodic_snapshots.append(
+                _snapshot_record(
+                    w + 1,
+                    "warmup",
+                    op_name,
+                    cand_cost,
+                    best_cost,
+                    candidate,
+                )
+            )
         if delta_e >= 0:
             deltas.append(delta_e)
 
@@ -514,6 +639,7 @@ def alns_improved(
             if incumbent_cost < best_cost:
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
+                best_found_iteration = w + 1
         else:
             stats[op_name]["worse_feasible"] += 1
             if random.random() < 0.8:
@@ -539,7 +665,15 @@ def alns_improved(
             else:
                 stats[op_name]["uphill_rejected"] += 1
 
-    delta_avg = (sum(deltas) / len(deltas)) if deltas else 1.0
+    if deltas:
+        sorted_deltas = sorted(deltas)
+        q = max(0.0, min(1.0, float(warmup_delta_trim_quantile)))
+        cut_idx = int(len(sorted_deltas) * q)
+        cut_idx = max(1, min(len(sorted_deltas), cut_idx))
+        trimmed = sorted_deltas[:cut_idx]
+        delta_avg = sum(trimmed) / len(trimmed)
+    else:
+        delta_avg = 1.0
     t0 = -delta_avg / math.log(0.8)
     t0_used_fallback = False
     if t0 <= 0:
@@ -551,23 +685,27 @@ def alns_improved(
 
     weights = {k: 1.0 / len(op_names) for k in op_names}
     segment_scores = {k: 0.0 for k in op_names}
+    segment_uses = {k: 0 for k in op_names}
     segment_feasible_uses = {k: 0 for k in op_names}
     weight_history = []
+    temperature_history = []
+    if collect_temperature_history:
+        temperature_history.append((warmup_iterations, float(temperature)))
 
     sigma_global_best = 8.0
     sigma_incumbent_improve = 4.0
-    sigma_uphill_accept = 0.2
-    reward_delta_norm = max(1e-9, float(reward_delta_norm))
-    reward_delta_cap = max(0.0, float(reward_delta_cap))
 
     escape_calls = 0
     escape_feasible_steps = 0
     no_best_improve_steps = 0
 
     for it in range(iterations):
+        if collect_temperature_history:
+            temperature_history.append((warmup_iterations + it + 1, float(temperature)))
         configure_operator_search_progress((warmup_iterations + it) / total_steps)
         op_name = roulette_pick(weights, op_names)
         stats[op_name]["used"] += 1
+        segment_uses[op_name] += 1
 
         candidate = apply_main_operator(incumbent, op_name)
         if candidate is incumbent or candidate == incumbent:
@@ -586,6 +724,19 @@ def alns_improved(
         segment_feasible_uses[op_name] += 1
 
         delta_e = cand_cost - incumbent_cost
+        if collect_delta_points:
+            delta_points[op_name].append((warmup_iterations + it + 1, float(delta_e)))
+        if snapshot_every_iteration and ((warmup_iterations + it + 1) % snapshot_iteration_stride == 0):
+            periodic_snapshots.append(
+                _snapshot_record(
+                    warmup_iterations + it + 1,
+                    "main",
+                    op_name,
+                    cand_cost,
+                    best_cost,
+                    candidate,
+                )
+            )
         accepted = False
         improved_best = False
 
@@ -602,6 +753,7 @@ def alns_improved(
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
                 improved_best = True
+                best_found_iteration = warmup_iterations + it + 1
         else:
             stats[op_name]["worse_feasible"] += 1
             p_accept = math.exp(-delta_e / temperature) if temperature > 0 else 0.0
@@ -633,21 +785,19 @@ def alns_improved(
                 )
 
         improve_mag = max(0.0, -delta_e)
-        meaningful_improve = improve_mag >= float(min_reward_improvement)
-        delta_bonus = min(reward_delta_cap, improve_mag / reward_delta_norm)
+        meaningful_improve = improve_mag >= float(reward_improve_threshold)
+        magnitude_bonus = min(
+            3.0,
+            improve_mag / max(1.0, 2.0 * float(reward_improve_threshold)),
+        )
 
         if improved_best:
             if meaningful_improve:
-                segment_scores[op_name] += sigma_global_best + delta_bonus
+                segment_scores[op_name] += sigma_global_best + magnitude_bonus
             no_best_improve_steps = 0
         elif delta_e < 0:
-            # Accepted improving moves only earn ALNS reward if improvement is meaningful,
-            # and larger deltas receive proportionally larger score.
             if meaningful_improve:
-                segment_scores[op_name] += sigma_incumbent_improve + delta_bonus
-            no_best_improve_steps += 1
-        elif accepted:
-            segment_scores[op_name] += sigma_uphill_accept
+                segment_scores[op_name] += sigma_incumbent_improve + 0.5 * magnitude_bonus
             no_best_improve_steps += 1
         else:
             no_best_improve_steps += 1
@@ -656,10 +806,11 @@ def alns_improved(
             updated = {}
             progress = (warmup_iterations + it + 1) / total_steps
             for k in op_names:
-                theta = segment_feasible_uses[k]
+                theta = segment_uses[k]
                 if theta > 0:
-                    # When feasibility is scarce, reduce adaptation aggressiveness.
-                    effective_r = reaction_factor * (theta / (theta + 2.0))
+                    # Use total operator calls in the denominator so sparse-feasible operators
+                    # are not over-rewarded by a few large successful moves.
+                    effective_r = reaction_factor * (theta / (theta + 8.0))
                     updated[k] = weights[k] * (1.0 - effective_r) + effective_r * (
                         segment_scores[k] / theta
                     )
@@ -672,6 +823,7 @@ def alns_improved(
             weights = _normalize_weight_dict(updated)
             weight_history.append((it + 1, dict(weights)))
             segment_scores = {k: 0.0 for k in op_names}
+            segment_uses = {k: 0 for k in op_names}
             segment_feasible_uses = {k: 0 for k in op_names}
 
         if no_best_improve_steps >= escape_stall_limit:
@@ -687,6 +839,7 @@ def alns_improved(
             if esc_improved_best and incumbent_cost < best_cost:
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
+                best_found_iteration = warmup_iterations + it + 1
                 no_best_improve_steps = 0
             else:
                 no_best_improve_steps = max(0, escape_stall_limit // 3)
@@ -706,9 +859,14 @@ def alns_improved(
         "t0_used_fallback": t0_used_fallback,
         "final_weights": dict(weights),
         "phase_weights": phase_weights,
+        "weight_history": weight_history,
         "escape_calls": escape_calls,
         "escape_feasible_steps": escape_feasible_steps,
         "accepted_snapshots": accepted_snapshots,
+        "periodic_snapshots": periodic_snapshots,
+        "best_found_iteration": best_found_iteration,
+        "delta_points": delta_points,
+        "temperature_history": temperature_history,
     }
 
     return best_solution, best_cost, stats
@@ -731,9 +889,16 @@ def run_statistics(
     snapshot_on_accepted=False,
     snapshot_output_file=None,
     snapshot_accept_stride=1,
-    min_reward_improvement=15.0,
-    reward_delta_norm=500.0,
-    reward_delta_cap=6.0,
+    snapshot_every_iteration=False,
+    snapshot_iteration_stride=25,
+    reward_improve_threshold=50.0,
+    warmup_delta_trim_quantile=0.9,
+    plot_delta_scatter_best_run=True,
+    delta_plot_output_dir=None,
+    plot_weights_best_run=True,
+    weight_plot_output_dir=None,
+    plot_temperature_best_run=True,
+    temperature_plot_output_dir=None,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -741,7 +906,7 @@ def run_statistics(
     ctx, calc, checker = build_evaluator(instance_data)
     configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op4"]
+    op_names = ["op1", "op2", "op3", "op8"]
 
     init_feasible, init_cost = evaluate_solution(initial_solution, calc, checker)
     if not init_feasible:
@@ -767,6 +932,11 @@ def run_statistics(
     }
     total_escape_calls = 0
     total_escape_steps = 0
+    best_found_iterations = []
+    best_run_delta_points = None
+    best_run_weight_history = None
+    best_run_temperature_history = None
+    best_run_index = None
 
     for run_id in range(runs):
         start = time.perf_counter()
@@ -786,9 +956,12 @@ def run_statistics(
             shared_eval_cache=shared_eval_cache,
             snapshot_on_accepted=snapshot_on_accepted,
             snapshot_accept_stride=snapshot_accept_stride,
-            min_reward_improvement=min_reward_improvement,
-            reward_delta_norm=reward_delta_norm,
-            reward_delta_cap=reward_delta_cap,
+            snapshot_every_iteration=snapshot_every_iteration,
+            snapshot_iteration_stride=snapshot_iteration_stride,
+            reward_improve_threshold=reward_improve_threshold,
+            warmup_delta_trim_quantile=warmup_delta_trim_quantile,
+            collect_delta_points=plot_delta_scatter_best_run,
+            collect_temperature_history=plot_temperature_best_run,
         )
         elapsed = time.perf_counter() - start
 
@@ -813,7 +986,13 @@ def run_statistics(
                     phase_weights_acc[phase][k] += float(phase_map.get(k, 0.0))
             total_escape_calls += int(run_meta.get("escape_calls", 0))
             total_escape_steps += int(run_meta.get("escape_feasible_steps", 0))
-            if snapshot_on_accepted and snapshot_output_file and run_id == 0:
+            best_found_iterations.append(int(run_meta.get("best_found_iteration", 0)))
+            if (snapshot_on_accepted or snapshot_every_iteration) and snapshot_output_file and run_id == 0:
+                chosen_snapshots = (
+                    run_meta.get("periodic_snapshots", [])
+                    if snapshot_every_iteration
+                    else run_meta.get("accepted_snapshots", [])
+                )
                 payload = {
                     "instance": file_name,
                     "run_id": 1,
@@ -821,7 +1000,8 @@ def run_statistics(
                     "iterations": iterations,
                     "initial_score": init_cost,
                     "snapshot_accept_stride": int(snapshot_accept_stride),
-                    "snapshots": run_meta.get("accepted_snapshots", []),
+                    "snapshot_iteration_stride": int(snapshot_iteration_stride),
+                    "snapshots": chosen_snapshots,
                 }
                 out_path = Path(snapshot_output_file)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -832,11 +1012,20 @@ def run_statistics(
         run_times.append(elapsed)
 
         if verbose:
-            print(f"Best score in run {run_id + 1}/{runs}: {best_cost}")
+            best_iter = best_found_iterations[-1] if best_found_iterations else 0
+            print(
+                f"Best score in run {run_id + 1}/{runs}: {best_cost} "
+                f"(best found at iteration i*={best_iter})"
+            )
 
         if best_cost < global_best_cost:
             global_best_cost = best_cost
             global_best_solution = clone_solution(best_solution)
+            best_run_meta = op_stats.get("_meta") or {}
+            best_run_delta_points = best_run_meta.get("delta_points", None)
+            best_run_weight_history = best_run_meta.get("weight_history", None)
+            best_run_temperature_history = best_run_meta.get("temperature_history", None)
+            best_run_index = run_id + 1
 
     avg_obj = sum(run_costs) / len(run_costs)
     best_obj = global_best_cost
@@ -869,7 +1058,55 @@ def run_statistics(
         "avg_phase_weights": avg_phase_weights,
         "escape_calls": total_escape_calls,
         "escape_steps": total_escape_steps,
+        "best_found_iterations": best_found_iterations,
     }
+
+    delta_plot_files = []
+    if plot_delta_scatter_best_run and best_run_delta_points is not None:
+        plot_dir = (
+            delta_plot_output_dir
+            if delta_plot_output_dir is not None
+            else str(ASSIGNMENT_DIR / "outputs" / "delta_plots")
+        )
+        delta_plot_files = _plot_operator_deltas(
+            best_run_delta_points,
+            op_names,
+            plot_dir,
+            file_name,
+            f"run{best_run_index}",
+        )
+    metrics["delta_plot_files"] = delta_plot_files
+
+    weight_plot_file = ""
+    if plot_weights_best_run and best_run_weight_history is not None:
+        plot_dir = (
+            weight_plot_output_dir
+            if weight_plot_output_dir is not None
+            else str(ASSIGNMENT_DIR / "outputs" / "weight_plots")
+        )
+        weight_plot_file = _plot_operator_weights(
+            best_run_weight_history,
+            op_names,
+            plot_dir,
+            file_name,
+            f"run{best_run_index}",
+        )
+    metrics["weight_plot_file"] = weight_plot_file
+
+    temperature_plot_file = ""
+    if plot_temperature_best_run and best_run_temperature_history is not None:
+        plot_dir = (
+            temperature_plot_output_dir
+            if temperature_plot_output_dir is not None
+            else str(ASSIGNMENT_DIR / "outputs" / "temperature_plots")
+        )
+        temperature_plot_file = _plot_temperature_history(
+            best_run_temperature_history,
+            plot_dir,
+            file_name,
+            f"run{best_run_index}",
+        )
+    metrics["temperature_plot_file"] = temperature_plot_file
 
     if verbose:
         print(f"Average score: {avg_obj}")
@@ -898,6 +1135,21 @@ def run_statistics(
             f"avg_final_weights=({final_w_str}), "
             f"escape_calls={total_escape_calls}, escape_feasible_steps={total_escape_steps}"
         )
+        if best_found_iterations:
+            print(
+                "Best solution iterations (i* per run): "
+                + ", ".join(str(x) for x in best_found_iterations)
+            )
+        if delta_plot_files:
+            print("Delta plots saved:")
+            for fp in delta_plot_files:
+                print(f"  {fp}")
+        if weight_plot_file:
+            print("Operator weights plot saved:")
+            print(f"  {weight_plot_file}")
+        if temperature_plot_file:
+            print("Temperature plot saved:")
+            print(f"  {temperature_plot_file}")
         print(
             "ALNS phase weights: "
             f"early({early_w_str}), mid({mid_w_str}), late({late_w_str})"

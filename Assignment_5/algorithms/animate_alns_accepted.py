@@ -100,19 +100,54 @@ def _draw_snapshot(ax, snap, coords, xlim=None, ylim=None):
         ax.set_xlim(xmin - xpad, xmax + xpad)
         ax.set_ylim(ymin - ypad, ymax + ypad)
     ax.grid(alpha=0.2)
+    shown_iter = int(snap.get("display_iter", snap["iter"]))
     ax.set_title(
-        f"iter={snap['iter']} | phase={snap['phase']} | op={snap['operator']} | "
+        f"iter={shown_iter} | phase={snap['phase']} | op={snap['operator']} | "
         f"inc={snap['incumbent_cost']:.1f} | best={snap['best_cost']:.1f}"
     )
 
 
-def animate_from_snapshot_file(snapshot_file, output_gif):
+def _resample_snapshots_every_n_iterations(snapshots, n=100):
+    if not snapshots:
+        return []
+    n = max(1, int(n))
+    ordered = sorted(snapshots, key=lambda s: int(s["iter"]))
+    max_iter = int(ordered[-1]["iter"])
+
+    sampled = []
+    ptr = 0
+    last_seen = None
+    for boundary in range(n, max_iter + 1, n):
+        while ptr < len(ordered) and int(ordered[ptr]["iter"]) <= boundary:
+            last_seen = ordered[ptr]
+            ptr += 1
+        if last_seen is not None:
+            snap = dict(last_seen)
+            snap["display_iter"] = boundary
+            sampled.append(snap)
+
+    # Ensure at least one frame and include the final accepted solution.
+    if not sampled:
+        sampled = [dict(ordered[-1])]
+        sampled[0]["display_iter"] = int(ordered[-1]["iter"])
+    else:
+        if int(sampled[-1].get("iter", 0)) != int(ordered[-1]["iter"]):
+            tail = dict(ordered[-1])
+            tail["display_iter"] = int(ordered[-1]["iter"])
+            sampled.append(tail)
+
+    return sampled
+
+
+def animate_from_snapshot_file(snapshot_file, output_gif, iteration_stride=25, resample=False):
     with open(snapshot_file, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
     snapshots = payload.get("snapshots", [])
     if not snapshots:
         raise ValueError("No snapshots found in file.")
+    if resample:
+        snapshots = _resample_snapshots_every_n_iterations(snapshots, n=iteration_stride)
 
     max_node = 0
     for s in snapshots:
@@ -154,14 +189,14 @@ def run_one_and_animate(
     warmup_iterations=500,
     iterations=9500,
     final_temperature=0.1,
-    snapshot_accept_stride=1,
+    animation_iteration_stride=25,
 ):
     instance_data = alns.load_instance()
     n_customers = instance_data["n_customers"]
     initial_solution = [[i for i in range(n_customers + 1)] + [0], [], []]
 
     out_dir = Path(alns.ASSIGNMENT_DIR) / "outputs"
-    snapshot_file = out_dir / "accepted_snapshots_run1.json"
+    snapshot_file = out_dir / "iteration_snapshots_run1.json"
     gif_file = out_dir / "accepted_solutions_evolution.gif"
 
     alns.run_statistics(
@@ -174,12 +209,18 @@ def run_one_and_animate(
         verbose=True,
         return_metrics=False,
         print_solution_pipe=False,
-        snapshot_on_accepted=True,
+        snapshot_on_accepted=False,
+        snapshot_every_iteration=True,
+        snapshot_iteration_stride=animation_iteration_stride,
         snapshot_output_file=str(snapshot_file),
-        snapshot_accept_stride=snapshot_accept_stride,
     )
 
-    output_path = animate_from_snapshot_file(str(snapshot_file), str(gif_file))
+    output_path = animate_from_snapshot_file(
+        str(snapshot_file),
+        str(gif_file),
+        iteration_stride=animation_iteration_stride,
+        resample=False,
+    )
     print(f"Animation written to: {output_path}")
 
 

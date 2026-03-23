@@ -31,6 +31,7 @@ _EXPLORE_PROB = 0.12
 _PAIR_EXPLORE_PROB = 0.10
 _TRUCK_TO_DRONE_BIAS = 0.0
 _SYNC_PEN_WEIGHT = 0.15
+_SEARCH_PROGRESS = 0.5
 
 # Tuning knobs
 _MAX_ATTEMPTS = 5
@@ -57,7 +58,8 @@ def set_truck_to_drone_bias(bias):
 
 
 def set_search_progress(progress):
-    pass
+    global _SEARCH_PROGRESS
+    _SEARCH_PROGRESS = _clamp01(progress)
 
 
 def _clone_solution(solution):
@@ -213,13 +215,26 @@ def _select_insert_target(removal_choice, solution):
         return random.choice(choices)
 
     if removal_choice == 0:
-        truck_to_drone_prob = 0.34 + 0.40 * _TRUCK_TO_DRONE_BIAS
+        # Phase-aware ramp: very truck-heavy early, then gradually increase drone usage.
+        if _SEARCH_PROGRESS < 0.15:
+            truck_to_drone_prob = 0.03
+        elif _SEARCH_PROGRESS < 0.35:
+            truck_to_drone_prob = 0.12
+        elif _SEARCH_PROGRESS < 0.60:
+            truck_to_drone_prob = 0.28 + 0.25 * _TRUCK_TO_DRONE_BIAS
+        else:
+            truck_to_drone_prob = 0.38 + 0.36 * _TRUCK_TO_DRONE_BIAS
         if random.random() < truck_to_drone_prob:
             return 1 if len(drone1) <= len(drone2) else 2
         return 0
 
     # Drone source: usually try truck, sometimes swap drone route
-    truck_insert_prob = 0.70
+    if _SEARCH_PROGRESS < 0.20:
+        truck_insert_prob = 0.92
+    elif _SEARCH_PROGRESS < 0.50:
+        truck_insert_prob = 0.80
+    else:
+        truck_insert_prob = 0.66
     if random.random() < truck_insert_prob:
         return 0
     return 2 if removal_choice == 1 else 1
