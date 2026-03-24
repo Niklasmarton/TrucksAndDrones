@@ -7,6 +7,7 @@ from . import (
     op6_truck_random,
     op7_truck_swap,
     op8_related_destroy,
+    op9_escape_related_large,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "op6_truck_random",
     "op7_truck_swap",
     "op8_related_destroy",
+    "op9_escape_related_large",
 ]

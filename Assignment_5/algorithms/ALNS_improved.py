@@ -24,9 +24,10 @@ import op2_destroy_repair as op2
 import op3_or_opt as op3
 import op4_drone_retiming as op4
 import op8_related_destroy as op8
+import op9_escape_related_large as op9
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
-file_name = "R_100.txt"
+file_name = "R_50.txt"
 
 
 def clone_solution(solution):
@@ -54,13 +55,13 @@ def configure_operator_context(instance_data):
     D = instance_data["drone_times"]
     fr = instance_data["flight_limit"]
     depot = instance_data.get("depot_index", 0)
-    for op in (op1, op2, op3, op4, op8):
+    for op in (op1, op2, op3, op4, op8, op9):
         if hasattr(op, "set_operator_context"):
             op.set_operator_context(T, D, fr, depot)
 
 
 def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3, op4, op8):
+    for op in (op1, op2, op3, op4, op8, op9):
         if hasattr(op, "set_search_progress"):
             op.set_search_progress(progress)
 
@@ -289,6 +290,38 @@ def _plot_temperature_history(temperature_history, output_dir, instance_label, r
     return str(out_file)
 
 
+def _plot_acceptance_probability(acceptance_points, output_dir, instance_label, run_label):
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return ""
+
+    if not acceptance_points:
+        return ""
+
+    safe_instance = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(instance_label))
+    safe_run = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_label))
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    xs = [int(p[0]) for p in acceptance_points]
+    ys = [float(p[1]) for p in acceptance_points]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.scatter(xs, ys, s=10, alpha=0.55, color="tab:purple")
+    ax.set_title(f"Acceptance Probability for Worsening Moves ({instance_label}, {run_label})")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Probability of Acceptance")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(alpha=0.25)
+    plt.tight_layout()
+
+    out_file = out_dir / f"acceptance_probability_{safe_instance}_{safe_run}.png"
+    fig.savefig(out_file, dpi=150)
+    plt.close(fig)
+    return str(out_file)
+
+
 def _init_stats(op_names):
     return {
         op_name: {
@@ -313,6 +346,64 @@ def _normalize_weight_dict(weights, min_weight=0.03):
     fixed = {k: max(min_weight, float(v)) for k, v in weights.items()}
     s = sum(fixed.values())
     return {k: v / s for k, v in fixed.items()}
+
+
+def _normalize_weight_dict_with_caps(
+    weights,
+    min_weight=0.03,
+    lower_caps=None,
+    upper_caps=None,
+):
+    lower_caps = lower_caps or {}
+    upper_caps = upper_caps or {}
+    keys = list(weights.keys())
+    if not keys:
+        return {}
+
+    base = {k: max(min_weight, float(weights[k])) for k in keys}
+    lower = {k: max(min_weight, float(lower_caps.get(k, min_weight))) for k in keys}
+    upper = {k: float(upper_caps.get(k, 1.0)) for k in keys}
+
+    for k in keys:
+        if upper[k] < lower[k]:
+            upper[k] = lower[k]
+
+    x = {k: min(max(base[k], lower[k]), upper[k]) for k in keys}
+
+    # Bounded re-scaling so sum(x)=1 while preserving per-operator bounds.
+    for _ in range(24):
+        s = sum(x.values())
+        if abs(s - 1.0) <= 1e-12:
+            break
+
+        if s > 1.0:
+            free = [k for k in keys if x[k] > lower[k] + 1e-12]
+            if not free:
+                break
+            excess = s - 1.0
+            room = sum(x[k] - lower[k] for k in free)
+            if room <= 1e-12:
+                break
+            for k in free:
+                take = excess * ((x[k] - lower[k]) / room)
+                x[k] = max(lower[k], x[k] - take)
+        else:
+            free = [k for k in keys if x[k] < upper[k] - 1e-12]
+            if not free:
+                break
+            deficit = 1.0 - s
+            room = sum(upper[k] - x[k] for k in free)
+            if room <= 1e-12:
+                break
+            for k in free:
+                add = deficit * ((upper[k] - x[k]) / room)
+                x[k] = min(upper[k], x[k] + add)
+
+    # Final normalize for numerical cleanliness.
+    total = sum(x.values())
+    if total <= 0:
+        return _normalize_weight_dict(weights, min_weight=min_weight)
+    return {k: x[k] / total for k in keys}
 
 
 def _phase_weight_summary(weight_history, op_names, iterations, fallback_weights):
@@ -475,7 +566,7 @@ def _aggressive_escape_destroy_repair(solution, ctx):
     return [truck, drone1, drone2]
 
 
-def _escape_op2_twice(
+def _escape_with_related_large(
     incumbent,
     incumbent_cost,
     best_cost,
@@ -487,8 +578,8 @@ def _escape_op2_twice(
     improved_best = False
     feasible_steps = 0
 
-    for _ in range(12):
-        cand = op2.operator(current)
+    for _ in range(6):
+        cand = op9.operator(current)
         if cand is current or cand == current:
             continue
         if not fast_precheck_solution(cand, ctx):
@@ -502,6 +593,23 @@ def _escape_op2_twice(
         feasible_steps += 1
         if current_cost < best_cost:
             improved_best = True
+
+    # Fallback: run classic destroy/repair to keep escape robust when op9 misses.
+    if feasible_steps == 0:
+        for _ in range(8):
+            cand = op2.operator(current)
+            if cand is current or cand == current:
+                continue
+            if not fast_precheck_solution(cand, ctx):
+                continue
+            feasible, cand_cost = cached_evaluate(cand)
+            if not feasible:
+                continue
+            current = cand
+            current_cost = cand_cost
+            feasible_steps += 1
+            if current_cost < best_cost:
+                improved_best = True
 
     if feasible_steps == 0:
         fallback = _aggressive_escape_destroy_repair(current, ctx)
@@ -526,7 +634,7 @@ def alns_improved(
     cache_limit=200000,
     reaction_factor=0.08,
     segment_length=200,
-    escape_stall_limit=500,
+    escape_stall_limit=650,
     ctx=None,
     calc=None,
     checker=None,
@@ -536,9 +644,15 @@ def alns_improved(
     snapshot_every_iteration=False,
     snapshot_iteration_stride=25,
     reward_improve_threshold=50.0,
+    uphill_reward_cap=30.0,
+    sigma_global_best=8.0,
+    sigma_incumbent_improve=4.0,
+    sigma_small_improve=1.0,
+    sigma_uphill_accepted=0.6,
     warmup_delta_trim_quantile=0.9,
     collect_delta_points=False,
     collect_temperature_history=False,
+    collect_acceptance_points=False,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -583,6 +697,7 @@ def alns_improved(
 
     deltas = []
     delta_points = {k: [] for k in op_names}
+    acceptance_points = []
     for w in range(warmup_iterations):
         configure_operator_search_progress(w / total_steps)
         op_name = random.choice(op_names)
@@ -615,6 +730,8 @@ def alns_improved(
             )
         if delta_e >= 0:
             deltas.append(delta_e)
+            if collect_acceptance_points:
+                acceptance_points.append((w + 1, 0.8))
 
         if delta_e < 0:
             incumbent = candidate
@@ -692,9 +809,6 @@ def alns_improved(
     if collect_temperature_history:
         temperature_history.append((warmup_iterations, float(temperature)))
 
-    sigma_global_best = 8.0
-    sigma_incumbent_improve = 4.0
-
     escape_calls = 0
     escape_feasible_steps = 0
     no_best_improve_steps = 0
@@ -759,6 +873,8 @@ def alns_improved(
             p_accept = math.exp(-delta_e / temperature) if temperature > 0 else 0.0
             stats[op_name]["p_accept_sum"] += p_accept
             stats[op_name]["p_accept_count"] += 1
+            if collect_acceptance_points:
+                acceptance_points.append((warmup_iterations + it + 1, float(p_accept)))
             if random.random() < p_accept:
                 incumbent = candidate
                 incumbent_cost = cand_cost
@@ -785,22 +901,36 @@ def alns_improved(
                 )
 
         improve_mag = max(0.0, -delta_e)
-        meaningful_improve = improve_mag >= float(reward_improve_threshold)
-        magnitude_bonus = min(
-            3.0,
-            improve_mag / max(1.0, 2.0 * float(reward_improve_threshold)),
-        )
+        improve_threshold = max(1.0, float(reward_improve_threshold))
+        meaningful_improve = improve_mag >= improve_threshold
+        magnitude_bonus = min(3.0, improve_mag / (2.0 * improve_threshold))
+        segment_reward = 0.0
 
         if improved_best:
-            if meaningful_improve:
-                segment_scores[op_name] += sigma_global_best + magnitude_bonus
+            segment_reward = float(sigma_global_best) + magnitude_bonus
             no_best_improve_steps = 0
         elif delta_e < 0:
             if meaningful_improve:
-                segment_scores[op_name] += sigma_incumbent_improve + 0.5 * magnitude_bonus
+                segment_reward = float(sigma_incumbent_improve) + 0.5 * magnitude_bonus
+            else:
+                # Keep some credit for small-but-consistent improving moves.
+                small_gain = improve_mag / improve_threshold
+                segment_reward = float(sigma_small_improve) * max(0.0, min(1.0, small_gain))
+            no_best_improve_steps += 1
+        elif accepted:
+            # Controlled credit for accepted uphill diversification moves.
+            uphill_cap = max(1.0, float(uphill_reward_cap))
+            if 0.0 < delta_e <= uphill_cap:
+                uphill_quality = max(0.0, 1.0 - (delta_e / uphill_cap))
+                temp_ratio = max(0.0, min(1.0, temperature / max(1.0, t0)))
+                temp_scale = 0.5 + 0.5 * temp_ratio
+                segment_reward = float(sigma_uphill_accepted) * uphill_quality * temp_scale
             no_best_improve_steps += 1
         else:
             no_best_improve_steps += 1
+
+        if segment_reward > 0.0:
+            segment_scores[op_name] += segment_reward
 
         if (it + 1) % segment_length == 0:
             updated = {}
@@ -820,7 +950,15 @@ def alns_improved(
                         updated[k] = weights[k] * (1.0 - 0.35 * reaction_factor)
                     else:
                         updated[k] = weights[k] * (1.0 - reaction_factor)
-            weights = _normalize_weight_dict(updated)
+            # Cap noisy destroy operators to keep adaptation stable:
+            # - lower cap preserves exploration
+            # - upper cap avoids late-run operator collapse into one heavy destroy move
+            weights = _normalize_weight_dict_with_caps(
+                updated,
+                min_weight=0.03,
+                lower_caps={"op2": 0.05, "op8": 0.05},
+                upper_caps={"op2": 0.40, "op8": 0.20},
+            )
             weight_history.append((it + 1, dict(weights)))
             segment_scores = {k: 0.0 for k in op_names}
             segment_uses = {k: 0 for k in op_names}
@@ -828,7 +966,7 @@ def alns_improved(
 
         if no_best_improve_steps >= escape_stall_limit:
             escape_calls += 1
-            incumbent, incumbent_cost, esc_improved_best, esc_steps = _escape_op2_twice(
+            incumbent, incumbent_cost, esc_improved_best, esc_steps = _escape_with_related_large(
                 incumbent,
                 incumbent_cost,
                 best_cost,
@@ -867,6 +1005,7 @@ def alns_improved(
         "best_found_iteration": best_found_iteration,
         "delta_points": delta_points,
         "temperature_history": temperature_history,
+        "acceptance_points": acceptance_points,
     }
 
     return best_solution, best_cost, stats
@@ -882,7 +1021,7 @@ def run_statistics(
     cache_limit=200000,
     reaction_factor=0.15,
     segment_length=100,
-    escape_stall_limit=500,
+    escape_stall_limit=650,
     verbose=True,
     return_metrics=False,
     print_solution_pipe=False,
@@ -892,6 +1031,11 @@ def run_statistics(
     snapshot_every_iteration=False,
     snapshot_iteration_stride=25,
     reward_improve_threshold=50.0,
+    uphill_reward_cap=30.0,
+    sigma_global_best=8.0,
+    sigma_incumbent_improve=4.0,
+    sigma_small_improve=1.0,
+    sigma_uphill_accepted=0.6,
     warmup_delta_trim_quantile=0.9,
     plot_delta_scatter_best_run=True,
     delta_plot_output_dir=None,
@@ -899,6 +1043,9 @@ def run_statistics(
     weight_plot_output_dir=None,
     plot_temperature_best_run=True,
     temperature_plot_output_dir=None,
+    plot_acceptance_probability_best_run=True,
+    acceptance_probability_output_dir=None,
+    temperature_threshold=1.0,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -936,7 +1083,9 @@ def run_statistics(
     best_run_delta_points = None
     best_run_weight_history = None
     best_run_temperature_history = None
+    best_run_acceptance_points = None
     best_run_index = None
+    threshold_cross_iterations = []
 
     for run_id in range(runs):
         start = time.perf_counter()
@@ -959,9 +1108,15 @@ def run_statistics(
             snapshot_every_iteration=snapshot_every_iteration,
             snapshot_iteration_stride=snapshot_iteration_stride,
             reward_improve_threshold=reward_improve_threshold,
+            uphill_reward_cap=uphill_reward_cap,
+            sigma_global_best=sigma_global_best,
+            sigma_incumbent_improve=sigma_incumbent_improve,
+            sigma_small_improve=sigma_small_improve,
+            sigma_uphill_accepted=sigma_uphill_accepted,
             warmup_delta_trim_quantile=warmup_delta_trim_quantile,
             collect_delta_points=plot_delta_scatter_best_run,
             collect_temperature_history=plot_temperature_best_run,
+            collect_acceptance_points=plot_acceptance_probability_best_run,
         )
         elapsed = time.perf_counter() - start
 
@@ -987,6 +1142,14 @@ def run_statistics(
             total_escape_calls += int(run_meta.get("escape_calls", 0))
             total_escape_steps += int(run_meta.get("escape_feasible_steps", 0))
             best_found_iterations.append(int(run_meta.get("best_found_iteration", 0)))
+            temp_hist = run_meta.get("temperature_history", [])
+            cross_iter = 0
+            thr = float(temperature_threshold)
+            for iter_idx, temp_val in temp_hist:
+                if float(temp_val) <= thr:
+                    cross_iter = int(iter_idx)
+                    break
+            threshold_cross_iterations.append(cross_iter)
             if (snapshot_on_accepted or snapshot_every_iteration) and snapshot_output_file and run_id == 0:
                 chosen_snapshots = (
                     run_meta.get("periodic_snapshots", [])
@@ -1025,6 +1188,7 @@ def run_statistics(
             best_run_delta_points = best_run_meta.get("delta_points", None)
             best_run_weight_history = best_run_meta.get("weight_history", None)
             best_run_temperature_history = best_run_meta.get("temperature_history", None)
+            best_run_acceptance_points = best_run_meta.get("acceptance_points", None)
             best_run_index = run_id + 1
 
     avg_obj = sum(run_costs) / len(run_costs)
@@ -1059,6 +1223,12 @@ def run_statistics(
         "escape_calls": total_escape_calls,
         "escape_steps": total_escape_steps,
         "best_found_iterations": best_found_iterations,
+        "temperature_threshold": float(temperature_threshold),
+        "temperature_threshold_cross_iterations": threshold_cross_iterations,
+        "temperature_threshold_cross_mean": (
+            sum(x for x in threshold_cross_iterations if x > 0)
+            / max(1, len([x for x in threshold_cross_iterations if x > 0]))
+        ) if threshold_cross_iterations else 0.0,
     }
 
     delta_plot_files = []
@@ -1108,6 +1278,21 @@ def run_statistics(
         )
     metrics["temperature_plot_file"] = temperature_plot_file
 
+    acceptance_probability_plot_file = ""
+    if plot_acceptance_probability_best_run and best_run_acceptance_points is not None:
+        plot_dir = (
+            acceptance_probability_output_dir
+            if acceptance_probability_output_dir is not None
+            else str(ASSIGNMENT_DIR / "outputs" / "acceptance_probability_plots")
+        )
+        acceptance_probability_plot_file = _plot_acceptance_probability(
+            best_run_acceptance_points,
+            plot_dir,
+            file_name,
+            f"run{best_run_index}",
+        )
+    metrics["acceptance_probability_plot_file"] = acceptance_probability_plot_file
+
     if verbose:
         print(f"Average score: {avg_obj}")
         print(f"Best score: {best_obj}")
@@ -1125,6 +1310,18 @@ def run_statistics(
                 f"t0_min={min(t0_values):.4f}, t0_max={max(t0_values):.4f}, "
                 f"t0_fallback_runs={t0_fallback_count}/{runs}"
             )
+            crossed = [x for x in threshold_cross_iterations if x > 0]
+            if crossed:
+                print(
+                    f"Temperature threshold diagnostics (T<={float(temperature_threshold):.4f}): "
+                    f"cross_mean={sum(crossed)/len(crossed):.1f}, "
+                    "cross_iters=" + ", ".join(str(x) for x in threshold_cross_iterations)
+                )
+            else:
+                print(
+                    f"Temperature threshold diagnostics (T<={float(temperature_threshold):.4f}): "
+                    f"not crossed in {runs}/{runs} runs"
+                )
 
         final_w_str = ", ".join([f"{k}={avg_final_weights[k]:.3f}" for k in op_names])
         early_w_str = ", ".join([f"{k}={avg_phase_weights['early'][k]:.3f}" for k in op_names])
@@ -1150,6 +1347,9 @@ def run_statistics(
         if temperature_plot_file:
             print("Temperature plot saved:")
             print(f"  {temperature_plot_file}")
+        if acceptance_probability_plot_file:
+            print("Acceptance probability plot saved:")
+            print(f"  {acceptance_probability_plot_file}")
         print(
             "ALNS phase weights: "
             f"early({early_w_str}), mid({mid_w_str}), late({late_w_str})"
@@ -1217,7 +1417,7 @@ def main():
         cache_limit=200000,
         reaction_factor=0.15,
         segment_length=100,
-        escape_stall_limit=500,
+        escape_stall_limit=650,
         verbose=True,
         return_metrics=False,
         print_solution_pipe=False,
