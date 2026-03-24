@@ -27,7 +27,7 @@ import op8_related_destroy as op8
 import op9_escape_related_large as op9
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
-file_name = "R_50.txt"
+file_name = "F_100.txt"
 
 
 def clone_solution(solution):
