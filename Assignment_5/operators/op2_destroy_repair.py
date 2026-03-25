@@ -222,6 +222,35 @@ def _candidate_drone_inserts(node, truck, drone1, drone2, truck_times, drone_tim
     return candidates
 
 
+def _drone_phase_penalty():
+    if _SEARCH_PROGRESS < 0.15:
+        return 120.0
+    if _SEARCH_PROGRESS < 0.35:
+        return 60.0
+    if _SEARCH_PROGRESS < 0.60:
+        return 20.0
+    return 0.0
+
+
+def _node_insertion_options(node, truck, drone1, drone2, truck_times, drone_times):
+    options = []
+
+    truck_delta, truck_ins_idx = _best_truck_insert(node, truck, truck_times)
+    if truck_ins_idx is not None:
+        options.append((truck_delta, "truck", truck_ins_idx))
+
+    drone_candidates = _candidate_drone_inserts(
+        node, truck, drone1, drone2, truck_times, drone_times
+    )
+    if drone_candidates:
+        drone_phase_pen = _drone_phase_penalty()
+        for drone_score, route_id, new_target in drone_candidates:
+            options.append((drone_score + drone_phase_pen, "drone", route_id, new_target))
+
+    options.sort(key=lambda x: x[0])
+    return options
+
+
 def operator(current_solution):
     """
     op6: LNS destroy/repair
@@ -252,38 +281,48 @@ def operator(current_solution):
         if drone1 is None or drone2 is None:
             return current_solution
 
-    random.shuffle(removed_nodes)
-    for node in removed_nodes:
-        truck_delta, truck_ins_idx = _best_truck_insert(node, truck, truck_times)
-        drone_candidates = _candidate_drone_inserts(node, truck, drone1, drone2, truck_times, drone_times)
+    pending_nodes = removed_nodes[:]
+    while pending_nodes:
+        best_choice = None
+        best_node = None
 
-        use_drone = False
-        if drone_candidates:
-            drone_candidates.sort(key=lambda x: x[0])
-            chosen_drone = drone_candidates[0]
-            if random.random() < _EXPLORE_PROB:
-                chosen_drone = _rank_biased_pick(drone_candidates, top_k=4)
-            best_drone_score, best_route_id, best_new_target = chosen_drone
-            threshold = truck_delta if truck_delta is not None else float("inf")
-            # Early phase is intentionally truck-centric; allow drone repair mostly later.
-            if _SEARCH_PROGRESS < 0.15:
-                use_drone = (best_drone_score + 120.0 < threshold) and (random.random() < 0.04)
-            elif _SEARCH_PROGRESS < 0.35:
-                use_drone = (best_drone_score + 60.0 < threshold) and (random.random() < 0.15)
-            elif _SEARCH_PROGRESS < 0.60:
-                use_drone = best_drone_score < threshold or random.random() < (0.55 * _EXPLORE_PROB)
-            else:
-                use_drone = best_drone_score < threshold or random.random() < _EXPLORE_PROB
+        for node in pending_nodes:
+            options = _node_insertion_options(
+                node, truck, drone1, drone2, truck_times, drone_times
+            )
+            if not options:
+                continue
 
-        if use_drone:
+            best_opt = options[0]
+            best_cost = best_opt[0]
+            second_cost = options[1][0] if len(options) > 1 else (best_cost + 250.0)
+            regret = second_cost - best_cost
+
+            # Regret-2: insert first the node that would hurt most if postponed.
+            # Tie-break by lower best insertion cost.
+            cand = (regret, -best_cost, best_opt, node)
+            if best_choice is None or cand[0] > best_choice[0] or (
+                cand[0] == best_choice[0] and cand[1] > best_choice[1]
+            ):
+                best_choice = cand
+                best_node = node
+
+        if best_choice is None:
+            return current_solution
+
+        _, _, chosen_opt, _ = best_choice
+        _, mode, *data = chosen_opt
+        if mode == "truck":
+            truck_ins_idx = data[0]
+            truck = truck[:truck_ins_idx] + [best_node] + truck[truck_ins_idx:]
+        else:
+            best_route_id, best_new_target = data
             if best_route_id == 1:
                 drone1 = best_new_target
             else:
                 drone2 = best_new_target
-        else:
-            if truck_ins_idx is None:
-                return current_solution
-            truck = truck[:truck_ins_idx] + [node] + truck[truck_ins_idx:]
+
+        pending_nodes.remove(best_node)
 
     new_solution = [truck, drone1, drone2]
     if new_solution == current_solution:
