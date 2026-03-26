@@ -8,6 +8,7 @@ from . import (
     op7_truck_swap,
     op8_related_destroy,
     op9_escape_related_large,
+    op10_truck_2opt,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "op7_truck_swap",
     "op8_related_destroy",
     "op9_escape_related_large",
+    "op10_truck_2opt",
 ]

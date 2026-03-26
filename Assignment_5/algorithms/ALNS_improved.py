@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from pathlib import Path
+from datetime import datetime
 import sys
 import random
 import math
@@ -22,12 +23,12 @@ from FeasibiltyCheck import SolutionFeasibility
 import op1_reinsert as op1
 import op2_destroy_repair as op2
 import op3_or_opt as op3
-import op4_drone_retiming as op4
 import op8_related_destroy as op8
 import op9_escape_related_large as op9
+import op10_truck_2opt as op10
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
-file_name = "F_100.txt"
+file_name = "R_100.txt"
 
 
 def clone_solution(solution):
@@ -55,13 +56,13 @@ def configure_operator_context(instance_data):
     D = instance_data["drone_times"]
     fr = instance_data["flight_limit"]
     depot = instance_data.get("depot_index", 0)
-    for op in (op1, op2, op3, op4, op8, op9):
+    for op in (op1, op2, op3, op8, op9, op10):
         if hasattr(op, "set_operator_context"):
             op.set_operator_context(T, D, fr, depot)
 
 
 def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3, op4, op8, op9):
+    for op in (op1, op2, op3, op8, op9, op10):
         if hasattr(op, "set_search_progress"):
             op.set_search_progress(progress)
 
@@ -174,6 +175,33 @@ def format_solution_pipe(solution):
         f"{','.join(str(x) for x in parts['part3'])} | "
         f"{','.join(str(x) for x in parts['part4'])}"
     )
+
+
+def _append_best_runs_log(
+    log_file,
+    instance_label,
+    run_records,
+    average_cost,
+    overall_best_cost,
+):
+    out_path = Path(log_file)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().isoformat(timespec="seconds")
+
+    with open(out_path, "a", encoding="utf-8") as f:
+        f.write(
+            f"=== {timestamp} | instance={instance_label} | runs={len(run_records)} ===\n"
+        )
+        for rec in run_records:
+            f.write(
+                f"run {rec['run_id']}: best_cost={rec['best_cost']:.1f}, "
+                f"best_iter={rec['best_iter']}, runtime={rec['runtime']:.4f}s\n"
+            )
+        f.write(f"average_cost={average_cost:.1f}\n")
+        f.write(f"overall_best_cost={overall_best_cost:.1f}\n")
+        f.write("\n")
+
+    return str(out_path)
 
 
 def _snapshot_record(iter_idx, phase, op_name, incumbent_cost, best_cost, solution):
@@ -454,7 +482,9 @@ def apply_main_operator(solution, op_name):
         return op3.operator(solution)
     if op_name == "op8":
         return op8.operator(solution)
-    return op4.operator(solution)
+    if op_name == "op10":
+        return op10.operator(solution)
+
 
 
 def _truck_removal_gain(truck, idx, truck_times):
@@ -660,7 +690,7 @@ def alns_improved(
         ctx, calc, checker = build_evaluator(instance_data)
         configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op8"]
+    op_names = ["op1", "op2", "op3", "op8", "op10"]
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
 
@@ -957,7 +987,7 @@ def alns_improved(
                 updated,
                 min_weight=0.03,
                 lower_caps={"op2": 0.05, "op8": 0.05},
-                upper_caps={"op2": 0.40, "op8": 0.20},
+                upper_caps={"op2": 0.40, "op8": 0.20, "op10": 0.25},
             )
             weight_history.append((it + 1, dict(weights)))
             segment_scores = {k: 0.0 for k in op_names}
@@ -1037,15 +1067,17 @@ def run_statistics(
     sigma_small_improve=1.0,
     sigma_uphill_accepted=0.6,
     warmup_delta_trim_quantile=0.9,
-    plot_delta_scatter_best_run=True,
+    plot_delta_scatter_best_run=False,
     delta_plot_output_dir=None,
-    plot_weights_best_run=True,
+    plot_weights_best_run=False,
     weight_plot_output_dir=None,
-    plot_temperature_best_run=True,
+    plot_temperature_best_run=False,
     temperature_plot_output_dir=None,
-    plot_acceptance_probability_best_run=True,
+    plot_acceptance_probability_best_run=False,
     acceptance_probability_output_dir=None,
     temperature_threshold=1.0,
+    save_best_runs_log=False,
+    best_runs_log_file=None,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -1053,7 +1085,7 @@ def run_statistics(
     ctx, calc, checker = build_evaluator(instance_data)
     configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op8"]
+    op_names = ["op1", "op2", "op3", "op8", "op10"]
 
     init_feasible, init_cost = evaluate_solution(initial_solution, calc, checker)
     if not init_feasible:
@@ -1086,6 +1118,7 @@ def run_statistics(
     best_run_acceptance_points = None
     best_run_index = None
     threshold_cross_iterations = []
+    run_best_records = []
 
     for run_id in range(runs):
         start = time.perf_counter()
@@ -1173,9 +1206,17 @@ def run_statistics(
 
         run_costs.append(best_cost)
         run_times.append(elapsed)
+        best_iter = best_found_iterations[-1] if best_found_iterations else 0
+        run_best_records.append(
+            {
+                "run_id": int(run_id + 1),
+                "best_cost": float(best_cost),
+                "best_iter": int(best_iter),
+                "runtime": float(elapsed),
+            }
+        )
 
         if verbose:
-            best_iter = best_found_iterations[-1] if best_found_iterations else 0
             print(
                 f"Best score in run {run_id + 1}/{runs}: {best_cost} "
                 f"(best found at iteration i*={best_iter})"
@@ -1293,6 +1334,22 @@ def run_statistics(
         )
     metrics["acceptance_probability_plot_file"] = acceptance_probability_plot_file
 
+    best_runs_log_path = ""
+    if save_best_runs_log and global_best_solution is not None and run_best_records:
+        out_file = (
+            best_runs_log_file
+            if best_runs_log_file is not None
+            else str(ASSIGNMENT_DIR / "outputs" / "best_runs_history.txt")
+        )
+        best_runs_log_path = _append_best_runs_log(
+            out_file,
+            file_name,
+            run_best_records,
+            avg_obj,
+            best_obj,
+        )
+    metrics["best_runs_log_file"] = best_runs_log_path
+
     if verbose:
         print(f"Average score: {avg_obj}")
         print(f"Best score: {best_obj}")
@@ -1350,6 +1407,9 @@ def run_statistics(
         if acceptance_probability_plot_file:
             print("Acceptance probability plot saved:")
             print(f"  {acceptance_probability_plot_file}")
+        if best_runs_log_path:
+            print("Best-run history appended to:")
+            print(f"  {best_runs_log_path}")
         print(
             "ALNS phase weights: "
             f"early({early_w_str}), mid({mid_w_str}), late({late_w_str})"
@@ -1421,6 +1481,11 @@ def main():
         verbose=True,
         return_metrics=False,
         print_solution_pipe=False,
+        plot_delta_scatter_best_run=True,
+        plot_weights_best_run=True,
+        plot_temperature_best_run=True,
+        plot_acceptance_probability_best_run=True,
+        save_best_runs_log=True,
     )
 
 

@@ -5,7 +5,7 @@ Through testing, this gave stable temperature estimates and consistently good so
 
 ## Operators Used
 
-For this assignment, I implemented three operators:
+For assignment 3, I implemented three operators:
 
 1. **Truck-Drone-Reinsert**
 2. **Destroy-Repair**
