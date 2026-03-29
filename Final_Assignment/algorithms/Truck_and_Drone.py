@@ -3,7 +3,6 @@ from pathlib import Path
 from datetime import datetime
 import sys
 import random
-import math
 import time
 import json
 import re
@@ -310,9 +309,9 @@ def _plot_temperature_history(temperature_history, output_dir, instance_label, r
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(xs, ys, linewidth=1.6, color="tab:red")
-    ax.set_title(f"Temperature Across Iterations ({instance_label}, {run_label})")
+    ax.set_title(f"RRT Deviation Across Iterations ({instance_label}, {run_label})")
     ax.set_xlabel("Iteration")
-    ax.set_ylabel("Temperature")
+    ax.set_ylabel("Allowed Deviation D")
     ax.grid(alpha=0.25)
     plt.tight_layout()
 
@@ -341,9 +340,9 @@ def _plot_acceptance_probability(acceptance_points, output_dir, instance_label, 
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.scatter(xs, ys, s=10, alpha=0.55, color="tab:purple")
-    ax.set_title(f"Acceptance Probability for Worsening Moves ({instance_label}, {run_label})")
+    ax.set_title(f"RRT Acceptance Indicator for Worsening Moves ({instance_label}, {run_label})")
     ax.set_xlabel("Iteration")
-    ax.set_ylabel("Probability of Acceptance")
+    ax.set_ylabel("Acceptable Under RRT (0/1)")
     ax.set_ylim(0.0, 1.0)
     ax.grid(alpha=0.25)
     plt.tight_layout()
@@ -720,6 +719,7 @@ def alns_improved(
     collect_temperature_history=False,
     collect_acceptance_points=False,
     collect_accepted_objective_points=False,
+    rrt_deviation_factor=0.13,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -766,6 +766,13 @@ def alns_improved(
     delta_points = {k: [] for k in op_names}
     acceptance_points = []
     accepted_objective_points = []
+
+    def _rrt_deviation(best_obj, g, G):
+        G = max(1, int(G))
+        g = max(0, min(int(g), G))
+        frac = (G - g) / G
+        return float(rrt_deviation_factor) * frac * max(1.0, float(best_obj))
+
     for w in range(warmup_iterations):
         configure_operator_search_progress(w / total_steps)
         op_name = random.choice(op_names)
@@ -798,8 +805,6 @@ def alns_improved(
             )
         if delta_e >= 0:
             deltas.append(delta_e)
-            if collect_acceptance_points:
-                acceptance_points.append((w + 1, 0.8))
 
         if delta_e < 0:
             incumbent = candidate
@@ -829,13 +834,19 @@ def alns_improved(
                 best_found_iteration = w + 1
         else:
             stats[op_name]["worse_feasible"] += 1
-            if random.random() < 0.8:
+            rrt_dev_w = _rrt_deviation(best_cost, w + 1, warmup_iterations)
+            can_accept_worse = cand_cost <= (best_cost + rrt_dev_w)
+            if collect_acceptance_points:
+                acceptance_points.append((w + 1, 1.0 if can_accept_worse else 0.0))
+            if can_accept_worse:
                 incumbent = candidate
                 incumbent_cost = cand_cost
                 stats[op_name]["accepted"] += 1
                 stats[op_name]["uphill_accepted"] += 1
                 stats[op_name]["delta_sum"] += delta_e
                 stats[op_name]["uphill_accepted_delta_sum"] += delta_e
+                stats[op_name]["p_accept_sum"] += 1.0
+                stats[op_name]["p_accept_count"] += 1
                 if collect_accepted_objective_points:
                     accepted_objective_points.append((w + 1, float(incumbent_cost)))
                 if snapshot_on_accepted:
@@ -853,6 +864,8 @@ def alns_improved(
                         )
             else:
                 stats[op_name]["uphill_rejected"] += 1
+                stats[op_name]["p_accept_sum"] += 0.0
+                stats[op_name]["p_accept_count"] += 1
 
     if deltas:
         sorted_deltas = sorted(deltas)
@@ -862,15 +875,9 @@ def alns_improved(
         trimmed = sorted_deltas[:cut_idx]
         delta_avg = sum(trimmed) / len(trimmed)
     else:
-        delta_avg = 1.0
-    t0 = -delta_avg / math.log(0.8)
+        delta_avg = 0.0
+    t0 = _rrt_deviation(best_cost, 0, iterations)
     t0_used_fallback = False
-    if t0 <= 0:
-        t0 = 1.0
-        t0_used_fallback = True
-
-    alpha = (final_temperature / t0) ** (1.0 / iterations) if iterations > 0 else 1.0
-    temperature = t0
 
     weights = {k: 1.0 / len(op_names) for k in op_names}
     segment_scores = {k: 0.0 for k in op_names}
@@ -879,15 +886,16 @@ def alns_improved(
     weight_history = []
     temperature_history = []
     if collect_temperature_history:
-        temperature_history.append((warmup_iterations, float(temperature)))
+        temperature_history.append((warmup_iterations, float(t0)))
 
     escape_calls = 0
     escape_feasible_steps = 0
     no_best_improve_steps = 0
 
     for it in range(iterations):
+        rrt_dev = _rrt_deviation(best_cost, it + 1, iterations)
         if collect_temperature_history:
-            temperature_history.append((warmup_iterations + it + 1, float(temperature)))
+            temperature_history.append((warmup_iterations + it + 1, float(rrt_dev)))
         configure_operator_search_progress((warmup_iterations + it) / total_steps)
         op_name = roulette_pick(weights, op_names)
         stats[op_name]["used"] += 1
@@ -895,15 +903,12 @@ def alns_improved(
 
         candidate = apply_main_operator(incumbent, op_name)
         if candidate is incumbent or candidate == incumbent:
-            temperature = alpha * temperature
             continue
         if not fast_precheck_solution(candidate, ctx):
-            temperature = alpha * temperature
             continue
 
         feasible, cand_cost = cached_evaluate(candidate)
         if not feasible:
-            temperature = alpha * temperature
             continue
 
         stats[op_name]["feasible"] += 1
@@ -942,12 +947,13 @@ def alns_improved(
                 best_found_iteration = warmup_iterations + it + 1
         else:
             stats[op_name]["worse_feasible"] += 1
-            p_accept = math.exp(-delta_e / temperature) if temperature > 0 else 0.0
+            can_accept_worse = cand_cost <= (best_cost + rrt_dev)
+            p_accept = 1.0 if can_accept_worse else 0.0
             stats[op_name]["p_accept_sum"] += p_accept
             stats[op_name]["p_accept_count"] += 1
             if collect_acceptance_points:
                 acceptance_points.append((warmup_iterations + it + 1, float(p_accept)))
-            if random.random() < p_accept:
+            if can_accept_worse:
                 incumbent = candidate
                 incumbent_cost = cand_cost
                 accepted = True
@@ -992,13 +998,11 @@ def alns_improved(
                 segment_reward = float(sigma_small_improve) * max(0.0, min(1.0, small_gain))
             no_best_improve_steps += 1
         elif accepted:
-            # Controlled credit for accepted uphill diversification moves.
-            uphill_cap = max(1.0, float(uphill_reward_cap))
-            if 0.0 < delta_e <= uphill_cap:
-                uphill_quality = max(0.0, 1.0 - (delta_e / uphill_cap))
-                temp_ratio = max(0.0, min(1.0, temperature / max(1.0, t0)))
-                temp_scale = 0.5 + 0.5 * temp_ratio
-                segment_reward = float(sigma_uphill_accepted) * uphill_quality * temp_scale
+            # Controlled credit for accepted RRT diversification moves.
+            rrt_window = max(1.0, float(rrt_dev))
+            if 0.0 < delta_e <= rrt_window:
+                uphill_quality = max(0.0, 1.0 - (delta_e / rrt_window))
+                segment_reward = float(sigma_uphill_accepted) * uphill_quality
             no_best_improve_steps += 1
         else:
             no_best_improve_steps += 1
@@ -1055,8 +1059,6 @@ def alns_improved(
                 no_best_improve_steps = 0
             else:
                 no_best_improve_steps = max(0, escape_stall_limit // 3)
-
-        temperature = alpha * temperature
 
     best_parts = to_parts_solution(best_solution)
     assert checker.is_solution_feasible(best_parts)
@@ -1427,23 +1429,23 @@ def run_statistics(
         )
         if t0_values:
             print(
-                "SA temperature diagnostics: "
+                "RRT acceptance diagnostics: "
                 f"warmup_delta_avg_mean={sum(warmup_delta_avgs)/len(warmup_delta_avgs):.4f}, "
                 f"warmup_samples_mean={sum(warmup_delta_samples)/len(warmup_delta_samples):.1f}, "
-                f"t0_mean={sum(t0_values)/len(t0_values):.4f}, "
-                f"t0_min={min(t0_values):.4f}, t0_max={max(t0_values):.4f}, "
-                f"t0_fallback_runs={t0_fallback_count}/{runs}"
+                f"d0_mean={sum(t0_values)/len(t0_values):.4f}, "
+                f"d0_min={min(t0_values):.4f}, d0_max={max(t0_values):.4f}, "
+                f"d0_fallback_runs={t0_fallback_count}/{runs}"
             )
             crossed = [x for x in threshold_cross_iterations if x > 0]
             if crossed:
                 print(
-                    f"Temperature threshold diagnostics (T<={float(temperature_threshold):.4f}): "
+                    f"Deviation threshold diagnostics (D<={float(temperature_threshold):.4f}): "
                     f"cross_mean={sum(crossed)/len(crossed):.1f}, "
                     "cross_iters=" + ", ".join(str(x) for x in threshold_cross_iterations)
                 )
             else:
                 print(
-                    f"Temperature threshold diagnostics (T<={float(temperature_threshold):.4f}): "
+                    f"Deviation threshold diagnostics (D<={float(temperature_threshold):.4f}): "
                     f"not crossed in {runs}/{runs} runs"
                 )
 
@@ -1469,10 +1471,10 @@ def run_statistics(
             print("Operator weights plot saved:")
             print(f"  {weight_plot_file}")
         if temperature_plot_file:
-            print("Temperature plot saved:")
+            print("RRT deviation plot saved:")
             print(f"  {temperature_plot_file}")
         if acceptance_probability_plot_file:
-            print("Acceptance probability plot saved:")
+            print("RRT acceptance indicator plot saved:")
             print(f"  {acceptance_probability_plot_file}")
         if accepted_objective_plot_file:
             print("Accepted objective plot saved:")

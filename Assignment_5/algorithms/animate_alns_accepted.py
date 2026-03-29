@@ -139,7 +139,7 @@ def _resample_snapshots_every_n_iterations(snapshots, n=100):
     return sampled
 
 
-def animate_from_snapshot_file(snapshot_file, output_gif, iteration_stride=25, resample=False):
+def animate_from_snapshot_file(snapshot_file, output_gif, iteration_stride=1, resample=False):
     with open(snapshot_file, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
@@ -189,7 +189,7 @@ def run_one_and_animate(
     warmup_iterations=500,
     iterations=9500,
     final_temperature=0.1,
-    animation_iteration_stride=25,
+    animation_iteration_stride=1,
 ):
     instance_data = alns.load_instance()
     n_customers = instance_data["n_customers"]
