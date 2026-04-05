@@ -25,6 +25,7 @@ import op3_or_opt as op3
 import op8_related_destroy as op8
 import op9_escape_related_large as op9
 import op10_truck_2opt as op10
+import op11_TSP_drone_rebuild as op11
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
 file_name = "F_100.txt"
@@ -55,13 +56,13 @@ def configure_operator_context(instance_data):
     D = instance_data["drone_times"]
     fr = instance_data["flight_limit"]
     depot = instance_data.get("depot_index", 0)
-    for op in (op1, op2, op3, op8, op9, op10):
+    for op in (op1, op2, op3, op8, op9, op10, op11):
         if hasattr(op, "set_operator_context"):
             op.set_operator_context(T, D, fr, depot)
 
 
 def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3, op8, op9, op10):
+    for op in (op1, op2, op3, op8, op9, op10, op11):
         if hasattr(op, "set_search_progress"):
             op.set_search_progress(progress)
 
@@ -519,6 +520,8 @@ def apply_main_operator(solution, op_name):
         return op8.operator(solution)
     if op_name == "op10":
         return op10.operator(solution)
+    if op_name == "op11":
+        return op11.operator(solution)
 
 
 
@@ -727,7 +730,7 @@ def alns_improved(
         ctx, calc, checker = build_evaluator(instance_data)
         configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op8", "op10"]
+    op_names = ["op1", "op2", "op3", "op8", "op10", "op11"]
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
 
@@ -1034,8 +1037,8 @@ def alns_improved(
             weights = _normalize_weight_dict_with_caps(
                 updated,
                 min_weight=0.03,
-                lower_caps={"op2": 0.05, "op8": 0.05},
-                upper_caps={"op2": 0.40, "op8": 0.20, "op10": 0.25},
+                lower_caps={"op2": 0.05, "op8": 0.05, "op11": 0.08},
+                upper_caps={"op2": 0.40, "op8": 0.20, "op10": 0.25, "op11": 0.20},
             )
             weight_history.append((it + 1, dict(weights)))
             segment_scores = {k: 0.0 for k in op_names}
@@ -1134,7 +1137,7 @@ def run_statistics(
     ctx, calc, checker = build_evaluator(instance_data)
     configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op8", "op10"]
+    op_names = ["op1", "op2", "op3", "op8", "op10", "op11"]
 
     init_feasible, init_cost = evaluate_solution(initial_solution, calc, checker)
     if not init_feasible:
@@ -1542,7 +1545,7 @@ def main():
     run_statistics(
         initial_solution,
         instance_data=instance_data,
-        runs=10,
+        runs=1,
         warmup_iterations=500,
         iterations=9500,
         final_temperature=0.1,
