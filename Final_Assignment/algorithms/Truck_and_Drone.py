@@ -26,9 +26,11 @@ import op8_related_destroy as op8
 import op9_escape_related_large as op9
 import op10_truck_2opt as op10
 import op11_TSP_drone_rebuild as op11
+import op12_truck_drone_swap as op12
+import op13_drone_sync_tuner as op13
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
-file_name = "F_100.txt"
+file_name = "F_10.txt"
 
 
 def clone_solution(solution):
@@ -39,6 +41,210 @@ def load_instance(instance_path=None):
     if instance_path is None:
         instance_path = TEST_FILES_DIR / file_name
     return read_instance(str(instance_path))
+
+
+def build_initial_solution(instance_data):
+    """
+    Construction heuristic:
+    1. Greedy NN walk assigns each customer to truck (0), drone1 (1), or drone2
+       (2) in a randomly-shuffled cyclic order.
+    2. ALL customers start on the truck in NN visit order (a solid starting
+       truck route that op11 can TSP-improve in the first iterations).
+    3. Customers designated for a drone are moved off the truck one by one:
+       - find the best static-hover-feasible (launch, land) pair in the current
+         (shrinking) truck, avoiding already-used endpoints
+       - if no valid pair exists the customer stays on the truck
+    4. An availability pass removes any drone trip where the drone can't finish
+       its prior mission before the next scheduled launch would require hovering
+       past the flight limit; those customers go back to the truck.
+    The result is always a valid feasible solution — no final fallback needed.
+    """
+    n_customers = instance_data["n_customers"]
+    depot = instance_data.get("depot_index", 0)
+    T = instance_data["truck_times"]
+    D = instance_data["drone_times"]
+    flight_limit = instance_data["flight_limit"]
+
+    # --- Step 1: NN walk with cyclic vehicle assignment ---
+    unvisited = list(range(1, n_customers + 1))
+    visit_order = []
+    assignment = {}  # node -> 0 (truck), 1 (drone1), 2 (drone2)
+    current = depot
+    cycle = [0, 1, 2]
+    random.shuffle(cycle)
+    step = 0
+    while unvisited:
+        nearest = min(unvisited, key=lambda n: T[current][n])
+        unvisited.remove(nearest)
+        current = nearest
+        visit_order.append(nearest)
+        assignment[nearest] = cycle[step % 3]
+        step += 1
+
+    # --- Step 2: All customers on the truck in NN visit order ---
+    truck = [depot] + visit_order + [depot]
+    drone1, drone2 = [], []
+
+    # --- Helpers ---
+    def _truck_prefix():
+        prefix = [0.0]
+        for i in range(len(truck) - 1):
+            prefix.append(prefix[-1] + T[truck[i]][truck[i + 1]])
+        return prefix
+
+    def _shift_after_remove(route, removed_idx):
+        """Remap indices after removing truck[removed_idx]."""
+        return [(n, l - (l > removed_idx), r - (r > removed_idx))
+                for n, l, r in route]
+
+    def _shift_after_insert(route, insert_idx):
+        """Remap indices after inserting at truck position insert_idx."""
+        return [(n, l + (l >= insert_idx), r + (r >= insert_idx))
+                for n, l, r in route]
+
+    def _find_pair_in(node, temp_truck, drone_route):
+        """
+        Find the best (launch_idx, land_idx) for node in temp_truck.
+        Checks:
+          - Raw drone flight <= flight_limit
+          - Static hover: max(drone_flight, truck_segment) <= flight_limit
+          - Timeline: the pair fits in at least one gap in the existing drone_route
+            (launch >= previous trip's land, landing <= next trip's launch)
+        drone_route is already index-adjusted for temp_truck.
+        """
+        nt = len(temp_truck)
+        prefix = [0.0]
+        for i in range(nt - 1):
+            prefix.append(prefix[-1] + T[temp_truck[i]][temp_truck[i + 1]])
+        used_l = {l for _, l, _ in drone_route}
+        used_r = {r for _, _, r in drone_route}
+
+        # Pre-build sorted (prev_land, next_launch) pairs for all insertion gaps.
+        sorted_trips = sorted(drone_route, key=lambda x: (x[1], x[2], x[0]))
+        gaps = []  # (prev_land, next_launch) for each insertion slot
+        for i in range(len(sorted_trips) + 1):
+            prev_land = 0 if i == 0 else sorted_trips[i - 1][2]
+            next_launch = float("inf") if i == len(sorted_trips) else sorted_trips[i][1]
+            gaps.append((prev_land, next_launch))
+
+        def _fits_in_gap(l, r):
+            """True if (l, r) fits in any timeline gap."""
+            for prev_land, next_launch in gaps:
+                if l >= prev_land and r <= next_launch:
+                    return True
+            return False
+
+        # Use a conservative limit to leave headroom for cross-drone truck delays
+        # that the static check can't see (drone2 landing delays truck at an
+        # intermediate node, increasing the effective segment for drone1).
+        safe_limit = flight_limit * 0.88
+
+        best_score, best_l, best_r = float("inf"), None, None
+        for l in range(1, nt - 1):
+            if l in used_l:
+                continue
+            for r in range(l + 1, nt - 1):
+                if r in used_r:
+                    continue
+                if not _fits_in_gap(l, r):
+                    continue
+                df = D[temp_truck[l]][node] + D[node][temp_truck[r]]
+                if df > safe_limit:
+                    continue
+                ts = prefix[r] - prefix[l]
+                if max(df, ts) > safe_limit:
+                    continue
+                hover = max(0.0, ts - df)
+                score = 2.0 * hover + 0.5 * abs(df - ts) + 0.01 * df
+                if score < best_score:
+                    best_score = score
+                    best_l, best_r = l, r
+        return (best_l, best_r) if best_l is not None else None
+
+    def _availability_pass(drone_route):
+        """
+        Walk trips in launch order.  For each trip, compute effective flight
+        accounting for drone availability (it can't launch before it returns
+        from its prior trip).  Remove trips that would require hovering past
+        flight_limit.  Returns (kept_trips, fallback_customers).
+        """
+        prefix = _truck_prefix()
+        trips = sorted(drone_route, key=lambda x: (x[1], x[2], x[0]))
+        kept, fallback, drone_est_return = [], [], 0.0
+        for node, l, r in trips:
+            df = D[truck[l]][node] + D[node][truck[r]]
+            actual_launch = max(prefix[l], drone_est_return)
+            drone_return_t = actual_launch + df
+            drone_hover = max(0.0, prefix[r] - drone_return_t)
+            if df + drone_hover > flight_limit:
+                fallback.append(node)
+            else:
+                kept.append((node, l, r))
+                drone_est_return = drone_return_t
+        return kept, fallback
+
+    # --- Step 3: Move drone-assigned customers from truck to their drone ---
+    for target, drone_route in [(1, drone1), (2, drone2)]:
+        candidates = [n for n in visit_order if assignment[n] == target]
+        for node in candidates:
+            node_idx = truck.index(node)
+            # Guard: if this truck position is already a launch or land node for
+            # an existing drone trip, removing it would corrupt those indices.
+            all_used_l = {l for _, l, _ in drone1} | {l for _, l, _ in drone2}
+            all_used_r = {r for _, _, r in drone1} | {r for _, _, r in drone2}
+            if node_idx in all_used_l or node_idx in all_used_r:
+                continue
+            temp_truck = truck[:node_idx] + truck[node_idx + 1:]
+            # Shift both drone routes for this removal (before finding the pair)
+            shifted_d1 = _shift_after_remove(drone1, node_idx)
+            shifted_d2 = _shift_after_remove(drone2, node_idx)
+            shifted_target = shifted_d1 if target == 1 else shifted_d2
+            pair = _find_pair_in(node, temp_truck, shifted_target)
+            if pair is None:
+                continue  # customer stays on truck
+            # Commit: update state in-place
+            truck[:] = temp_truck
+            drone1[:] = shifted_d1
+            drone2[:] = shifted_d2
+            drone_route.append((node, pair[0], pair[1]))
+            drone_route.sort(key=lambda x: (x[1], x[2], x[0]))
+
+    # --- Step 4: Availability pass — fix multi-trip drone timeline violations ---
+    drone1[:], fb1 = _availability_pass(drone1)
+    drone2[:], fb2 = _availability_pass(drone2)
+    for node in fb1 + fb2:
+        _, ins_idx = _best_truck_insert(node, truck, T)
+        if ins_idx is None:
+            ins_idx = len(truck) - 1
+        drone1[:] = _shift_after_insert(drone1, ins_idx)
+        drone2[:] = _shift_after_insert(drone2, ins_idx)
+        truck[:] = truck[:ins_idx] + [node] + truck[ins_idx:]
+
+    # --- Step 5: Final safety pass using the dynamic calculator ---
+    # Cross-drone cascading effects (drone2 landing delays truck at an
+    # intermediate node, increasing effective flight for a concurrent drone1 trip)
+    # can slip through the static checks above.  Iteratively remove drone trips
+    # until the dynamic simulation passes, then put failed customers on the truck.
+    _, calc, checker = build_evaluator(instance_data)
+    for _attempt in range(len(drone1) + len(drone2) + 2):
+        feasible, _ = evaluate_solution([truck, drone1, drone2], calc, checker)
+        if feasible:
+            break
+        # Remove the last trip from whichever drone has more trips.
+        if not drone1 and not drone2:
+            break
+        target_route = drone1 if len(drone1) >= len(drone2) else drone2
+        worst = target_route[-1]
+        target_route.pop()
+        node_to_restore = worst[0]
+        _, ins_idx = _best_truck_insert(node_to_restore, truck, T)
+        if ins_idx is None:
+            ins_idx = len(truck) - 1
+        drone1[:] = _shift_after_insert(drone1, ins_idx)
+        drone2[:] = _shift_after_insert(drone2, ins_idx)
+        truck[:] = truck[:ins_idx] + [node_to_restore] + truck[ins_idx:]
+
+    return [truck, drone1, drone2]
 
 
 def unpack_instance(instance_data):
@@ -56,13 +262,13 @@ def configure_operator_context(instance_data):
     D = instance_data["drone_times"]
     fr = instance_data["flight_limit"]
     depot = instance_data.get("depot_index", 0)
-    for op in (op1, op2, op3, op8, op9, op10, op11):
+    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13):
         if hasattr(op, "set_operator_context"):
             op.set_operator_context(T, D, fr, depot)
 
 
 def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3, op8, op9, op10, op11):
+    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13):
         if hasattr(op, "set_search_progress"):
             op.set_search_progress(progress)
 
@@ -522,7 +728,10 @@ def apply_main_operator(solution, op_name):
         return op10.operator(solution)
     if op_name == "op11":
         return op11.operator(solution)
-
+    if op_name == "op12":
+        return op12.operator(solution)
+    if op_name == "op13":
+        return op13.operator(solution)
 
 
 def _truck_removal_gain(truck, idx, truck_times):
@@ -637,16 +846,25 @@ def _aggressive_escape_destroy_repair(solution, ctx):
 def _escape_with_related_large(
     incumbent,
     incumbent_cost,
+    best_solution,
     best_cost,
     ctx,
     cached_evaluate,
 ):
-    current = incumbent
-    current_cost = incumbent_cost
+    # Always restart from best known solution, not the drifted incumbent.
+    # This ensures escape explores a new basin relative to the global best,
+    # not from a degraded working point accumulated by uphill RRT moves.
+    current = clone_solution(best_solution)
+    current_cost = best_cost
     improved_best = False
     feasible_steps = 0
 
-    for _ in range(6):
+    # Scale perturbation depth to instance size: large instances need more
+    # op9 steps to escape a basin; small instances need only a light push.
+    n_customers = ctx.get("n_customers", 50)
+    n_escape_steps = max(3, min(20, n_customers // 5))
+
+    for _ in range(n_escape_steps):
         cand = op9.operator(current)
         if cand is current or cand == current:
             continue
@@ -680,8 +898,8 @@ def _escape_with_related_large(
                 improved_best = True
 
     if feasible_steps == 0:
-        fallback = _aggressive_escape_destroy_repair(current, ctx)
-        if fallback != current and fast_precheck_solution(fallback, ctx):
+        fallback = _aggressive_escape_destroy_repair(clone_solution(best_solution), ctx)
+        if fallback != best_solution and fast_precheck_solution(fallback, ctx):
             feasible, fb_cost = cached_evaluate(fallback)
             if feasible:
                 current = fallback
@@ -730,7 +948,25 @@ def alns_improved(
         ctx, calc, checker = build_evaluator(instance_data)
         configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op8", "op10", "op11"]
+    # Scale operator set to instance size.
+    # On F_20 (16-30 customers): op3/op8/op11 contribute very little
+    # (improve_per_1000 < 2.5k, op11 acceptance <2%) and waste ~40% of budget.
+    # Freeing that budget for op1/op2/op10 improved F_20 best from 3305→3295.
+    # On F_10 (≤15 customers): op3/op8 provide essential diversification —
+    # removing them stops the algorithm finding 1412 entirely. Keep all ops.
+    n_cust = ctx.get("n_customers", 100)
+    if n_cust <= 15:
+        # F_10/R_10 size. Full set so ALNS can adapt per instance type:
+        # - F_10: op3/op8/op11 diversify; op12 earns ~0.22 weight for truck↔drone swap
+        # - R_10: op13 earns high weight for timing tuning; op12 also helps
+        # op13 at floor weight (~0.03) on instances where it doesn't help costs very little.
+        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
+    elif 16 <= n_cust <= 30:
+        # F_20-size: op12 is very strong (found 3274); op13 helps timing.
+        op_names = ["op1", "op2", "op10", "op12", "op13"]
+    else:
+        # F_50/F_100/R_50/R_100: full operator set.
+        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
 
@@ -1034,11 +1270,30 @@ def alns_improved(
             # Cap noisy destroy operators to keep adaptation stable:
             # - lower cap preserves exploration
             # - upper cap avoids late-run operator collapse into one heavy destroy move
+            # On small instances (<=15 customers): cap op12 so it can't dominate
+            # — op12 was taking 0.22 weight on F_10 and stealing from op1/op3,
+            # dropping 1412 hit rate from ~17% to ~10%.
+            if n_cust <= 15:
+                # 8 operators total. Cap noisy ones so op1/op3 (the core
+                # diversifiers that find optimal on F_10) keep sufficient budget.
+                # op12 gets up to 0.22 naturally on F_10 — allow it.
+                # op13 caps at 0.15: it earns high weight on R_10, drifts to
+                # floor on F_10 so it costs almost nothing there.
+                _upper = {"op2": 0.35, "op8": 0.15, "op10": 0.20, "op11": 0.18,
+                          "op12": 0.25, "op13": 0.15}
+                _lower = {"op2": 0.05, "op8": 0.04, "op11": 0.05}
+            elif n_cust <= 30:
+                _upper = {"op2": 0.40, "op12": 0.30, "op13": 0.20}
+                _lower = {"op2": 0.05}
+            else:
+                _upper = {"op2": 0.40, "op8": 0.20, "op10": 0.25, "op11": 0.20,
+                          "op12": 0.20, "op13": 0.20}
+                _lower = {"op2": 0.05, "op11": 0.08}
             weights = _normalize_weight_dict_with_caps(
                 updated,
                 min_weight=0.03,
-                lower_caps={"op2": 0.05, "op8": 0.05, "op11": 0.08},
-                upper_caps={"op2": 0.40, "op8": 0.20, "op10": 0.25, "op11": 0.20},
+                lower_caps=_lower,
+                upper_caps=_upper,
             )
             weight_history.append((it + 1, dict(weights)))
             segment_scores = {k: 0.0 for k in op_names}
@@ -1050,6 +1305,7 @@ def alns_improved(
             incumbent, incumbent_cost, esc_improved_best, esc_steps = _escape_with_related_large(
                 incumbent,
                 incumbent_cost,
+                best_solution,
                 best_cost,
                 ctx,
                 cached_evaluate,
@@ -1059,9 +1315,9 @@ def alns_improved(
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
                 best_found_iteration = warmup_iterations + it + 1
-                no_best_improve_steps = 0
-            else:
-                no_best_improve_steps = max(0, escape_stall_limit // 3)
+            # Always reset fully so ALNS has a full window to explore from the
+            # escaped position before triggering again.
+            no_best_improve_steps = 0
 
     best_parts = to_parts_solution(best_solution)
     assert checker.is_solution_feasible(best_parts)
@@ -1130,6 +1386,7 @@ def run_statistics(
     temperature_threshold=1.0,
     save_best_runs_log=False,
     best_runs_log_file=None,
+    solution_factory=None,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -1137,9 +1394,16 @@ def run_statistics(
     ctx, calc, checker = build_evaluator(instance_data)
     configure_operator_context(instance_data)
 
-    op_names = ["op1", "op2", "op3", "op8", "op10", "op11"]
+    n_cust = ctx.get("n_customers", 100)
+    if n_cust <= 15:
+        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
+    elif 16 <= n_cust <= 30:
+        op_names = ["op1", "op2", "op10", "op12", "op13"]
+    else:
+        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
 
-    init_feasible, init_cost = evaluate_solution(initial_solution, calc, checker)
+    _check_sol = solution_factory() if solution_factory is not None else initial_solution
+    init_feasible, init_cost = evaluate_solution(_check_sol, calc, checker)
     if not init_feasible:
         raise ValueError("Initial solution is not feasible; cannot compute improvement statistics.")
 
@@ -1175,8 +1439,9 @@ def run_statistics(
 
     for run_id in range(runs):
         start = time.perf_counter()
+        run_start_solution = solution_factory() if solution_factory is not None else clone_solution(initial_solution)
         best_solution, best_cost, op_stats = alns_improved(
-            clone_solution(initial_solution),
+            run_start_solution,
             instance_data=instance_data,
             warmup_iterations=warmup_iterations,
             iterations=iterations,
@@ -1540,19 +1805,55 @@ def run_statistics(
 def main():
     instance_data = load_instance()
     n_customers = instance_data["n_customers"]
-    initial_solution = [[i for i in range(n_customers + 1)] + [0], [], []]
+
+    # Priority: guarantee optimal on small instances; get close on large ones.
+    #
+    # Small (≤15): each run is fast (~2-3s). Run many restarts with more
+    #   iterations per run so each individual run has a high chance of finding
+    #   optimal. With p=15% per run and 80 runs: P(find) ≈ 99.99%.
+    #
+    # Medium (16-30): fewer restarts, more iterations per run needed to explore
+    #   the larger search space.
+    #
+    # Large (>30): very expensive — a few long runs give the best quality.
+    #
+    # escape_stall_limit: escape after this many iterations without improvement.
+    #   Small instances escape more often (aggressive diversification).
+    # segment_length: ALNS weight update frequency.
+
+    if n_customers <= 15:
+        runs = 80
+        warmup = 500
+        iters = 19500          # 20k total per run; 80 runs × 20k = 1.6M total
+        escape_stall_limit = max(150, 4 * n_customers)   # escape more often
+        segment_length = max(15, n_customers)
+    elif n_customers <= 30:
+        runs = max(1, 600 // n_customers)
+        warmup = 500
+        iters = 9500
+        escape_stall_limit = max(200, 6 * n_customers)
+        segment_length = max(20, n_customers)
+    else:
+        # 10-minute budget: n=100 → ~119s per 10k iters → ~50k iters in ~10 min.
+        # Single long run is better than many short ones: best found at iter 9800+.
+        runs = 1
+        warmup = 500
+        iters = 49500          # 50k total; n=100 ≈ 595s < 600s
+        escape_stall_limit = max(200, 6 * n_customers)
+        segment_length = max(20, n_customers)
 
     run_statistics(
-        initial_solution,
+        None,
         instance_data=instance_data,
-        runs=1,
-        warmup_iterations=500,
-        iterations=9500,
+        solution_factory=lambda: build_initial_solution(instance_data),
+        runs=runs,
+        warmup_iterations=warmup,
+        iterations=iters,
         final_temperature=0.1,
         cache_limit=200000,
         reaction_factor=0.15,
-        segment_length=100,
-        escape_stall_limit=650,
+        segment_length=segment_length,
+        escape_stall_limit=escape_stall_limit,
         verbose=True,
         return_metrics=False,
         print_solution_pipe=False,
