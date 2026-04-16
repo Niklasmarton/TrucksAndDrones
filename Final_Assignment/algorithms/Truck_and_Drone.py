@@ -24,14 +24,15 @@ import op2_destroy_repair as op2
 import op3_or_opt as op3
 import op8_related_destroy as op8
 import op9_escape_related_large as op9
+import op14_double_bridge_escape as op14
 import op10_truck_2opt as op10
 import op11_TSP_drone_rebuild as op11
 import op12_truck_drone_swap as op12
 import op13_drone_sync_tuner as op13
+import op15_drone_relocate as op15
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
-file_name = "F_10.txt"
-
+file_name = "F_100.txt"
 
 def clone_solution(solution):
     return [solution[0][:], solution[1][:], solution[2][:]]
@@ -262,13 +263,13 @@ def configure_operator_context(instance_data):
     D = instance_data["drone_times"]
     fr = instance_data["flight_limit"]
     depot = instance_data.get("depot_index", 0)
-    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13):
+    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13, op15):
         if hasattr(op, "set_operator_context"):
             op.set_operator_context(T, D, fr, depot)
 
 
 def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13):
+    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13, op15):
         if hasattr(op, "set_search_progress"):
             op.set_search_progress(progress)
 
@@ -425,6 +426,148 @@ def _snapshot_record(iter_idx, phase, op_name, incumbent_cost, best_cost, soluti
         "drone1": [list(t) for t in solution[1]],
         "drone2": [list(t) for t in solution[2]],
     }
+
+
+def _embed_2d_from_distance_matrix(distance_matrix):
+    """Classic MDS: embed nodes into 2D using the truck-time matrix as distances."""
+    import numpy as np
+
+    d = np.array(distance_matrix, dtype=float)
+    n = d.shape[0]
+    j = np.eye(n) - np.ones((n, n)) / n
+    b = -0.5 * j @ (d ** 2) @ j
+    eigvals, eigvecs = np.linalg.eigh(b)
+    idx = np.argsort(eigvals)[::-1]
+    eigvals = eigvals[idx]
+    eigvecs = eigvecs[:, idx]
+    vals = np.maximum(eigvals[:2], 0.0)
+    vecs = eigvecs[:, :2]
+    coords = vecs * np.sqrt(vals)
+    if coords.shape[1] < 2:
+        coords = np.hstack([coords, np.zeros((coords.shape[0], 2 - coords.shape[1]))])
+    return coords
+
+
+def _plot_best_solution(solution, instance_data, output_dir, instance_label, cost):
+    """
+    Save a visualisation of the best solution to output_dir/best_visualised/.
+
+    Truck route: solid blue line with arrows.
+    Drone 1 trips: dashed orange line (launch → customer → land).
+    Drone 2 trips: dashed green line (launch → customer → land).
+    Nodes are labelled with their index; depot is a red square.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception:
+        return ""
+
+    truck, drone1, drone2 = solution
+    coords = _embed_2d_from_distance_matrix(instance_data["truck_times"])
+    depot = instance_data.get("depot_index", 0)
+
+    drone1_nodes = {t[0] for t in drone1}
+    drone2_nodes = {t[0] for t in drone2}
+    truck_only = [n for n in truck if n != depot and n not in drone1_nodes and n not in drone2_nodes]
+
+    fig, ax = plt.subplots(figsize=(11, 9))
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(instance_label))
+    ax.set_title(
+        f"{instance_label}  —  best cost: {cost:.1f}\n"
+        f"truck stops: {len(truck_only)}  |  drone1: {len(drone1)}  |  drone2: {len(drone2)}",
+        fontsize=11,
+    )
+    ax.set_xlabel("x (MDS projection)")
+    ax.set_ylabel("y (MDS projection)")
+
+    # All nodes as faint grey background dots
+    ax.scatter(coords[:, 0], coords[:, 1], s=18, c="lightgrey", zorder=1)
+
+    # Truck-only customers
+    if truck_only:
+        tx = [coords[n, 0] for n in truck_only]
+        ty = [coords[n, 1] for n in truck_only]
+        ax.scatter(tx, ty, s=55, c="tab:blue", zorder=3, label="Truck customer")
+
+    # Drone1 customers
+    if drone1_nodes:
+        d1x = [coords[n, 0] for n in drone1_nodes]
+        d1y = [coords[n, 1] for n in drone1_nodes]
+        ax.scatter(d1x, d1y, s=55, c="tab:orange", zorder=3, label="Drone 1 customer")
+
+    # Drone2 customers
+    if drone2_nodes:
+        d2x = [coords[n, 0] for n in drone2_nodes]
+        d2y = [coords[n, 1] for n in drone2_nodes]
+        ax.scatter(d2x, d2y, s=55, c="tab:green", zorder=3, label="Drone 2 customer")
+
+    # Depot
+    ax.scatter(
+        [coords[depot, 0]], [coords[depot, 1]],
+        s=160, c="red", marker="s", zorder=5, label="Depot",
+    )
+
+    # Truck route arrows
+    for i in range(len(truck) - 1):
+        a, b = truck[i], truck[i + 1]
+        dx = coords[b, 0] - coords[a, 0]
+        dy = coords[b, 1] - coords[a, 1]
+        ax.annotate(
+            "",
+            xy=(coords[b, 0], coords[b, 1]),
+            xytext=(coords[a, 0], coords[a, 1]),
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color="tab:blue",
+                lw=1.6,
+                alpha=0.75,
+                mutation_scale=12,
+            ),
+            zorder=2,
+        )
+
+    # Drone 1 trips
+    for node, launch_idx, land_idx in drone1:
+        ln = truck[launch_idx]
+        rn = truck[land_idx]
+        xs = [coords[ln, 0], coords[node, 0], coords[rn, 0]]
+        ys = [coords[ln, 1], coords[node, 1], coords[rn, 1]]
+        ax.plot(xs, ys, color="tab:orange", linestyle="--", linewidth=1.5, alpha=0.85, zorder=2)
+
+    # Drone 2 trips
+    for node, launch_idx, land_idx in drone2:
+        ln = truck[launch_idx]
+        rn = truck[land_idx]
+        xs = [coords[ln, 0], coords[node, 0], coords[rn, 0]]
+        ys = [coords[ln, 1], coords[node, 1], coords[rn, 1]]
+        ax.plot(xs, ys, color="tab:green", linestyle="--", linewidth=1.5, alpha=0.85, zorder=2)
+
+    # Node labels
+    n_nodes = len(instance_data["truck_times"])
+    fontsize = max(5, min(8, 80 // n_nodes))
+    for i in range(n_nodes):
+        ax.annotate(
+            str(i),
+            (coords[i, 0], coords[i, 1]),
+            fontsize=fontsize,
+            ha="center",
+            va="bottom",
+            xytext=(0, 4),
+            textcoords="offset points",
+            zorder=6,
+        )
+
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(alpha=0.2)
+    plt.tight_layout()
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"best_solution_{safe_label}.png"
+    fig.savefig(out_file, dpi=150)
+    plt.close(fig)
+    return str(out_file)
 
 
 def _plot_operator_deltas(delta_points_by_op, op_names, output_dir, instance_label, run_label):
@@ -732,6 +875,8 @@ def apply_main_operator(solution, op_name):
         return op12.operator(solution)
     if op_name == "op13":
         return op13.operator(solution)
+    if op_name == "op15":
+        return op15.operator(solution)
 
 
 def _truck_removal_gain(truck, idx, truck_times):
@@ -859,13 +1004,12 @@ def _escape_with_related_large(
     improved_best = False
     feasible_steps = 0
 
-    # Scale perturbation depth to instance size: large instances need more
-    # op9 steps to escape a basin; small instances need only a light push.
-    n_customers = ctx.get("n_customers", 50)
-    n_escape_steps = max(3, min(20, n_customers // 5))
-
-    for _ in range(n_escape_steps):
-        cand = op9.operator(current)
+    # Primary escape: double-bridge (op14).
+    # A single double-bridge is a complete topological perturbation — try up
+    # to 3 times in case of edge cases (very short route, remap failure).
+    # Expected quality impact: 1-5% above best, recovering in 50-100 iters.
+    for _ in range(3):
+        cand = op14.operator(current)
         if cand is current or cand == current:
             continue
         if not fast_precheck_solution(cand, ctx):
@@ -873,17 +1017,21 @@ def _escape_with_related_large(
         feasible, cand_cost = cached_evaluate(cand)
         if not feasible:
             continue
-
         current = cand
         current_cost = cand_cost
         feasible_steps += 1
         if current_cost < best_cost:
             improved_best = True
+        break  # one successful double-bridge is the full escape
 
-    # Fallback: run classic destroy/repair to keep escape robust when op9 misses.
+    # Fallback to op9 if double-bridge could not fire (e.g. too few nodes).
+    # Suggestion 1: reduced step count (was n_customers // 5 = 20 for n=100)
+    # to avoid compounding random degradation to 40%+ above best.
     if feasible_steps == 0:
-        for _ in range(8):
-            cand = op2.operator(current)
+        n_customers = ctx.get("n_customers", 50)
+        n_escape_steps = max(3, min(6, n_customers // 15))
+        for _ in range(n_escape_steps):
+            cand = op9.operator(current)
             if cand is current or cand == current:
                 continue
             if not fast_precheck_solution(cand, ctx):
@@ -897,6 +1045,7 @@ def _escape_with_related_large(
             if current_cost < best_cost:
                 improved_best = True
 
+    # Final fallback: aggressive destroy/repair.
     if feasible_steps == 0:
         fallback = _aggressive_escape_destroy_repair(clone_solution(best_solution), ctx)
         if fallback != best_solution and fast_precheck_solution(fallback, ctx):
@@ -963,10 +1112,18 @@ def alns_improved(
         op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
     elif 16 <= n_cust <= 30:
         # F_20-size: op12 is very strong (found 3274); op13 helps timing.
-        op_names = ["op1", "op2", "op10", "op12", "op13"]
+        # op3 added: or-opt segment moves help on R instances where single-node
+        # relocate (op1) misses improvements requiring two adjacent nodes to move.
+        op_names = ["op1", "op2", "op3", "op10", "op12", "op13"]
     else:
-        # F_50/F_100/R_50/R_100: full operator set.
-        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
+        # F_50/F_100/R_50/R_100: op8 and op10 both earn <8k improve/1k with the
+        # tight RRT window and decay to near min_weight floor — remove both.
+        # op15 added: cross-drone relocate explores the drone partition dimension
+        # that no other operator covers (moving customers between drone1/drone2).
+        op_names = ["op1", "op2", "op3", "op11", "op12", "op13", "op15"]
+        # Tighten RRT acceptance: 0.03 brings mid-run window to ~45% of the
+        # remaining gap vs 86% at 0.05, giving tighter, faster convergence.
+        rrt_deviation_factor = 0.05
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
 
@@ -1130,9 +1287,17 @@ def alns_improved(
     escape_calls = 0
     escape_feasible_steps = 0
     no_best_improve_steps = 0
+    # Warm RRT reset: after each escape, give the new basin a full d₀ acceptance
+    # window for this many iterations before resuming normal cooling.
+    _WARM_RESET_WINDOW = 500
+    escape_warm_reset_until = -1
 
     for it in range(iterations):
-        rrt_dev = _rrt_deviation(best_cost, it + 1, iterations)
+        if it <= escape_warm_reset_until:
+            # Full initial acceptance window regardless of how far into the run we are.
+            rrt_dev = float(rrt_deviation_factor) * max(1.0, float(best_cost))
+        else:
+            rrt_dev = _rrt_deviation(best_cost, it + 1, iterations)
         if collect_temperature_history:
             temperature_history.append((warmup_iterations + it + 1, float(rrt_dev)))
         configure_operator_search_progress((warmup_iterations + it) / total_steps)
@@ -1267,28 +1432,32 @@ def alns_improved(
                         updated[k] = weights[k] * (1.0 - 0.35 * reaction_factor)
                     else:
                         updated[k] = weights[k] * (1.0 - reaction_factor)
-            # Cap noisy destroy operators to keep adaptation stable:
-            # - lower cap preserves exploration
-            # - upper cap avoids late-run operator collapse into one heavy destroy move
-            # On small instances (<=15 customers): cap op12 so it can't dominate
-            # — op12 was taking 0.22 weight on F_10 and stealing from op1/op3,
-            # dropping 1412 hit rate from ~17% to ~10%.
+            # Caps follow a generalization principle: only constrain operators
+            # that risk structural collapse (LNS/destroy monopolising everything)
+            # or known pathological behaviour on small instances.
+            # Avoid instance-specific tuning — let ALNS adapt weights freely
+            # within wide bounds so the algorithm generalises to unknown instances.
             if n_cust <= 15:
-                # 8 operators total. Cap noisy ones so op1/op3 (the core
-                # diversifiers that find optimal on F_10) keep sufficient budget.
-                # op12 gets up to 0.22 naturally on F_10 — allow it.
-                # op13 caps at 0.15: it earns high weight on R_10, drifts to
-                # floor on F_10 so it costs almost nothing there.
-                _upper = {"op2": 0.35, "op8": 0.15, "op10": 0.20, "op11": 0.18,
-                          "op12": 0.25, "op13": 0.15}
-                _lower = {"op2": 0.05, "op8": 0.04, "op11": 0.05}
+                # Keep op2 bounded (LNS too noisy to monopolise small instances).
+                # Keep op8 floor alive for the diversification it provides.
+                # op12 allowed up to 0.30 — enough room on both R and F types.
+                # All other operators: no upper cap, let ALNS decide.
+                _upper = {"op2": 0.35, "op8": 0.15, "op12": 0.30}
+                _lower = {"op2": 0.05, "op8": 0.04}
             elif n_cust <= 30:
-                _upper = {"op2": 0.40, "op12": 0.30, "op13": 0.20}
+                # op3 capped at 0.22 so it cannot fully displace op12 on F
+                # instances (where op12 is the dominant contributor).
+                # op12 allowed up to 0.35 — it earns this on structured instances.
+                _upper = {"op2": 0.40, "op3": 0.22, "op12": 0.35}
                 _lower = {"op2": 0.05}
             else:
-                _upper = {"op2": 0.40, "op8": 0.20, "op10": 0.25, "op11": 0.20,
-                          "op12": 0.20, "op13": 0.20}
-                _lower = {"op2": 0.05, "op11": 0.08}
+                # Large instances: only cap op2 (LNS can't monopolise) and op12
+                # (allow up to 0.40 — earns it on many instances).
+                # No caps on op11/op13/op15: ALNS allocates these based on
+                # what the specific instance rewards, which is exactly the
+                # right generalisation behaviour.
+                _upper = {"op2": 0.40, "op12": 0.40}
+                _lower = {"op2": 0.05}
             weights = _normalize_weight_dict_with_caps(
                 updated,
                 min_weight=0.03,
@@ -1315,9 +1484,12 @@ def alns_improved(
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
                 best_found_iteration = warmup_iterations + it + 1
-            # Always reset fully so ALNS has a full window to explore from the
-            # escaped position before triggering again.
+            # Always reset stall counter so ALNS has a full window to explore
+            # from the escaped position before triggering again.
             no_best_improve_steps = 0
+            # Warm RRT reset: restore full d₀ acceptance for the next window
+            # so the new basin is explored properly regardless of run progress.
+            escape_warm_reset_until = it + _WARM_RESET_WINDOW
 
     best_parts = to_parts_solution(best_solution)
     assert checker.is_solution_feasible(best_parts)
@@ -1387,6 +1559,8 @@ def run_statistics(
     save_best_runs_log=False,
     best_runs_log_file=None,
     solution_factory=None,
+    save_best_solution_plot=False,
+    best_solution_plot_output_dir=None,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -1398,9 +1572,9 @@ def run_statistics(
     if n_cust <= 15:
         op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
     elif 16 <= n_cust <= 30:
-        op_names = ["op1", "op2", "op10", "op12", "op13"]
+        op_names = ["op1", "op2", "op3", "op10", "op12", "op13"]
     else:
-        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
+        op_names = ["op1", "op2", "op3", "op11", "op12", "op13", "op15"]
 
     _check_sol = solution_factory() if solution_factory is not None else initial_solution
     init_feasible, init_cost = evaluate_solution(_check_sol, calc, checker)
@@ -1436,6 +1610,9 @@ def run_statistics(
     best_run_index = None
     threshold_cross_iterations = []
     run_best_records = []
+
+    if "op11" in op_names:
+        op11.reset_diagnostics()
 
     for run_id in range(runs):
         start = time.perf_counter()
@@ -1687,6 +1864,22 @@ def run_statistics(
         )
     metrics["best_runs_log_file"] = best_runs_log_path
 
+    best_solution_plot_file = ""
+    if save_best_solution_plot and global_best_solution is not None:
+        plot_dir = (
+            best_solution_plot_output_dir
+            if best_solution_plot_output_dir is not None
+            else str(ASSIGNMENT_DIR / "outputs" / "best_visualised")
+        )
+        best_solution_plot_file = _plot_best_solution(
+            global_best_solution,
+            instance_data,
+            plot_dir,
+            file_name,
+            global_best_cost,
+        )
+    metrics["best_solution_plot_file"] = best_solution_plot_file
+
     if verbose:
         print(f"Average score: {avg_obj}")
         print(f"Best score: {best_obj}")
@@ -1750,6 +1943,9 @@ def run_statistics(
         if best_runs_log_path:
             print("Best-run history appended to:")
             print(f"  {best_runs_log_path}")
+        if best_solution_plot_file:
+            print("Best solution visualisation saved:")
+            print(f"  {best_solution_plot_file}")
         print(
             "ALNS phase weights: "
             f"early({early_w_str}), mid({mid_w_str}), late({late_w_str})"
@@ -1797,73 +1993,100 @@ def run_statistics(
                 f"avg_accepted_delta={avg_delta:.4f}, improve_per_1000_uses={improve_per_1k_uses:.2f}"
             )
 
+        if "op11" in op_names:
+            d = op11.get_diagnostics()
+            calls = d["calls"]
+            noop_pct = 100.0 * d["returned_same"] / calls if calls > 0 else 0.0
+            opt_pct  = 100.0 * d["ortools_optimal"] / calls if calls > 0 else 0.0
+            tmo_pct  = 100.0 * d["ortools_timeout"] / calls if calls > 0 else 0.0
+            fb_pct   = 100.0 * d["ortools_fallback"] / calls if calls > 0 else 0.0
+            print(
+                f"op11 TSP diagnostics: calls={calls}, "
+                f"different_route={d['tsp_improved']} ({100-noop_pct:.1f}%), "
+                f"same_route_noop={d['returned_same']} ({noop_pct:.1f}%)"
+            )
+            print(
+                f"  OR-Tools proven_optimal={d['ortools_optimal']} ({opt_pct:.1f}%), "
+                f"time_limit_hit={d['ortools_timeout']} ({tmo_pct:.1f}%), "
+                f"fell_back_to_2opt={d['ortools_fallback']} ({fb_pct:.1f}%)"
+            )
+            if d["avg_truck_cost_improvement"] > 0:
+                print(
+                    f"  truck cost improvement when different route found: "
+                    f"avg={d['avg_truck_cost_improvement']:.2f}, "
+                    f"max={d['max_truck_cost_improvement']:.2f}"
+                )
+
     if return_metrics:
         return global_best_solution, global_best_cost, metrics
     return global_best_solution, global_best_cost
 
 
-def main():
-    instance_data = load_instance()
-    n_customers = instance_data["n_customers"]
-
-    # Priority: guarantee optimal on small instances; get close on large ones.
-    #
-    # Small (≤15): each run is fast (~2-3s). Run many restarts with more
-    #   iterations per run so each individual run has a high chance of finding
-    #   optimal. With p=15% per run and 80 runs: P(find) ≈ 99.99%.
-    #
-    # Medium (16-30): fewer restarts, more iterations per run needed to explore
-    #   the larger search space.
-    #
-    # Large (>30): very expensive — a few long runs give the best quality.
-    #
-    # escape_stall_limit: escape after this many iterations without improvement.
-    #   Small instances escape more often (aggressive diversification).
-    # segment_length: ALNS weight update frequency.
-
+def _run_params(n_customers):
+    """Return (warmup, iters, escape_stall_limit, segment_length) for a given instance size."""
     if n_customers <= 15:
-        runs = 80
-        warmup = 500
-        iters = 19500          # 20k total per run; 80 runs × 20k = 1.6M total
-        escape_stall_limit = max(150, 4 * n_customers)   # escape more often
-        segment_length = max(15, n_customers)
+        return 500, 19500, max(150, 4 * n_customers), max(15, n_customers)
     elif n_customers <= 30:
-        runs = max(1, 600 // n_customers)
-        warmup = 500
-        iters = 9500
-        escape_stall_limit = max(200, 6 * n_customers)
-        segment_length = max(20, n_customers)
+        return 500, 9500, max(200, 6 * n_customers), max(20, n_customers)
+    elif n_customers <= 60:
+        return 500, 34500, 1000, max(20, n_customers)
     else:
-        # 10-minute budget: n=100 → ~119s per 10k iters → ~50k iters in ~10 min.
-        # Single long run is better than many short ones: best found at iter 9800+.
-        runs = 1
-        warmup = 500
-        iters = 49500          # 50k total; n=100 ≈ 595s < 600s
-        escape_stall_limit = max(200, 6 * n_customers)
-        segment_length = max(20, n_customers)
+        return 500, 34500, 1000, max(20, n_customers)
 
-    run_statistics(
-        None,
-        instance_data=instance_data,
-        solution_factory=lambda: build_initial_solution(instance_data),
-        runs=runs,
-        warmup_iterations=warmup,
-        iterations=iters,
-        final_temperature=0.1,
-        cache_limit=200000,
-        reaction_factor=0.15,
-        segment_length=segment_length,
-        escape_stall_limit=escape_stall_limit,
-        verbose=True,
-        return_metrics=False,
-        print_solution_pipe=False,
-        plot_delta_scatter_best_run=True,
-        plot_weights_best_run=True,
-        plot_temperature_best_run=True,
-        plot_acceptance_probability_best_run=True,
-        plot_accepted_objective_best_run=True,
-        save_best_runs_log=True,
-    )
+
+def main():
+    """
+    Run the algorithm once on every dataset in TEST_FILES_DIR and save all
+    outputs (plots, weight history, best-solution visualisation) to
+    Final_Assignment/outputs/.
+    """
+    global file_name
+
+    all_txt = sorted(TEST_FILES_DIR.glob("*.txt"))
+    # Keep only recognisable instance files; skip saved-solution or other stray files.
+    dataset_files = [
+        f for f in all_txt
+        if f.name.startswith(("R_", "F_", "Truck_Drone_"))
+    ]
+    if not dataset_files:
+        print(f"No dataset files found in {TEST_FILES_DIR}")
+        return
+
+    print(f"Found {len(dataset_files)} dataset(s): {[f.name for f in dataset_files]}")
+
+    for ds_path in dataset_files:
+        file_name = ds_path.name
+        print(f"\n{'='*60}")
+        print(f"Dataset: {file_name}")
+        print(f"{'='*60}")
+
+        instance_data = load_instance(ds_path)
+        n_customers = instance_data["n_customers"]
+        warmup, iters, escape_stall_limit, segment_length = _run_params(n_customers)
+
+        run_statistics(
+            None,
+            instance_data=instance_data,
+            solution_factory=lambda id=instance_data: build_initial_solution(id),
+            runs=1,
+            warmup_iterations=warmup,
+            iterations=iters,
+            final_temperature=0.1,
+            cache_limit=200000,
+            reaction_factor=0.15,
+            segment_length=segment_length,
+            escape_stall_limit=escape_stall_limit,
+            verbose=True,
+            return_metrics=False,
+            print_solution_pipe=False,
+            plot_delta_scatter_best_run=True,
+            plot_weights_best_run=True,
+            plot_temperature_best_run=True,
+            plot_acceptance_probability_best_run=True,
+            plot_accepted_objective_best_run=True,
+            save_best_runs_log=True,
+            save_best_solution_plot=True,
+        )
 
 
 if __name__ == "__main__":

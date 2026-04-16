@@ -34,6 +34,43 @@ except Exception:
 _REMAP_REPAIR_ATTEMPTS = 12   # randomised remap+repair attempts per call
 _FULL_REBUILD_ATTEMPTS = 6    # randomised full-rebuild attempts per call
 
+# Diagnostic counters — reset between runs if needed.
+_diag_calls = 0
+_diag_tsp_improved = 0      # OR-Tools/2-opt found a strictly different truck route
+_diag_returned_same = 0     # new_truck == old_truck → no-op
+_diag_ortools_optimal = 0   # OR-Tools confirmed optimal (status=1)
+_diag_ortools_timeout = 0   # OR-Tools hit time limit (status=3, may not be optimal)
+_diag_ortools_fallback = 0  # OR-Tools not used; fell back to NN+2-opt
+_diag_cost_improvements = []  # truck cost delta each time a different route was found
+
+
+def reset_diagnostics():
+    global _diag_calls, _diag_tsp_improved, _diag_returned_same
+    global _diag_ortools_optimal, _diag_ortools_timeout, _diag_ortools_fallback
+    global _diag_cost_improvements
+    _diag_calls = 0
+    _diag_tsp_improved = 0
+    _diag_returned_same = 0
+    _diag_ortools_optimal = 0
+    _diag_ortools_timeout = 0
+    _diag_ortools_fallback = 0
+    _diag_cost_improvements = []
+
+
+def get_diagnostics():
+    improvements = _diag_cost_improvements
+    return {
+        "calls": _diag_calls,
+        "tsp_improved": _diag_tsp_improved,
+        "returned_same": _diag_returned_same,
+        "improvement_rate": (_diag_tsp_improved / _diag_calls) if _diag_calls > 0 else 0.0,
+        "ortools_optimal": _diag_ortools_optimal,
+        "ortools_timeout": _diag_ortools_timeout,
+        "ortools_fallback": _diag_ortools_fallback,
+        "avg_truck_cost_improvement": (sum(improvements) / len(improvements)) if improvements else 0.0,
+        "max_truck_cost_improvement": max(improvements) if improvements else 0.0,
+    }
+
 
 def set_search_progress(progress):
     return None
@@ -249,7 +286,10 @@ def _solve_with_ortools(nodes, truck_times, depot):
 
         sol = routing.SolveWithParameters(params)
         if sol is None:
-            return None
+            return None, None
+
+        # status: 1=optimal, 2=feasible(not optimal), 3=timeout, 4=infeasible
+        status = routing.status()
 
         # Extract the ordered tour starting from depot.
         index = routing.Start(0)
@@ -259,7 +299,7 @@ def _solve_with_ortools(nodes, truck_times, depot):
             index = sol.Value(routing.NextVar(index))
 
         if len(tour_indices) != n:
-            return None
+            return None, None
 
         p = tour_indices.index(depot_idx)
         tour_fwd = tour_indices[p:] + tour_indices[:p]
@@ -268,13 +308,16 @@ def _solve_with_ortools(nodes, truck_times, depot):
         route_fwd = [nodes[i] for i in tour_fwd] + [depot]
         route_rev = [nodes[i] for i in tour_rev] + [depot]
         if _route_cost(route_fwd, truck_times) <= _route_cost(route_rev, truck_times):
-            return route_fwd
-        return route_rev
+            return route_fwd, status
+        return route_rev, status
     except Exception:
-        return None
+        return None, None
 
 
 def _optimize_truck_route_with_tsp(truck, truck_times, depot):
+    global _diag_ortools_optimal, _diag_ortools_timeout, _diag_ortools_fallback
+    global _diag_cost_improvements
+
     if len(truck) <= 4:
         return truck[:]
 
@@ -282,12 +325,26 @@ def _optimize_truck_route_with_tsp(truck, truck_times, depot):
     if len(nodes) <= 2:
         return truck[:]
 
-    ortools_route = _solve_with_ortools(nodes, truck_times, depot)
+    old_cost = _route_cost(truck, truck_times)
+
+    ortools_route, status = _solve_with_ortools(nodes, truck_times, depot)
     if ortools_route is not None:
+        # status: 1=optimal, 2=feasible(not proven optimal), 3=time-limit
+        if status == 1:
+            _diag_ortools_optimal += 1
+        elif status == 3:
+            _diag_ortools_timeout += 1
+        new_cost = _route_cost(ortools_route, truck_times)
+        if new_cost < old_cost:
+            _diag_cost_improvements.append(old_cost - new_cost)
         return ortools_route
 
+    _diag_ortools_fallback += 1
     heuristic = _nearest_neighbor_route(nodes, truck_times, depot)
     heuristic = _two_opt(heuristic, truck_times, max_passes=40)
+    new_cost = _route_cost(heuristic, truck_times)
+    if new_cost < old_cost:
+        _diag_cost_improvements.append(old_cost - new_cost)
     return heuristic
 
 
@@ -414,7 +471,7 @@ def _rebuild_drones_with_utils(truck, old_truck, drone1_old, drone2_old, truck_t
             drone1,
             drone2,
             preferred_pair=preferred_pair,
-            max_neighbors=12,
+            max_neighbors=16,
             pair_explore_prob=pair_explore_prob,
         )
         if inserted is None:
@@ -429,24 +486,24 @@ def _rebuild_drones_with_utils(truck, old_truck, drone1_old, drone2_old, truck_t
             drone2,
             drone1,
             preferred_pair=preferred_pair,
-            max_neighbors=12,
+            max_neighbors=16,
             pair_explore_prob=pair_explore_prob,
         )
         if inserted is None:
             return None
         truck, drone2, drone1, _ = inserted
 
-    drone1 = repair_drone_route(truck, drone1, max_repairs=max(32, 3 * len(drone1)), max_neighbors=12)
+    drone1 = repair_drone_route(truck, drone1, max_repairs=max(48, 5 * len(drone1)), max_neighbors=16)
     if drone1 is None:
         return None
-    drone2 = repair_drone_route(truck, drone2, max_repairs=max(32, 3 * len(drone2)), max_neighbors=12)
+    drone2 = repair_drone_route(truck, drone2, max_repairs=max(48, 5 * len(drone2)), max_neighbors=16)
     if drone2 is None:
         return None
     truck, drone1, drone2, ok = enforce_wait_feasible_with_truck_fallback(
         truck,
         drone1,
         drone2,
-        max_iterations=max(200, 8 * (len(drone1) + len(drone2) + 1)),
+        max_iterations=max(400, 16 * (len(drone1) + len(drone2) + 1)),
     )
     if not ok:
         return None
@@ -484,16 +541,16 @@ def _remap_and_repair(new_truck, old_truck, drone1_old, drone2_old, pair_explore
     if drone1 is None or drone2 is None:
         return None
 
-    drone1 = repair_drone_route(new_truck, drone1, max_repairs=max(32, 3 * len(drone1)), max_neighbors=12)
+    drone1 = repair_drone_route(new_truck, drone1, max_repairs=max(40, 4 * len(drone1)), max_neighbors=14)
     if drone1 is None:
         return None
-    drone2 = repair_drone_route(new_truck, drone2, max_repairs=max(32, 3 * len(drone2)), max_neighbors=12)
+    drone2 = repair_drone_route(new_truck, drone2, max_repairs=max(40, 4 * len(drone2)), max_neighbors=14)
     if drone2 is None:
         return None
 
     truck, drone1, drone2, ok = enforce_wait_feasible_with_truck_fallback(
         new_truck, drone1, drone2,
-        max_iterations=max(200, 8 * (len(drone1) + len(drone2) + 1)),
+        max_iterations=max(300, 12 * (len(drone1) + len(drone2) + 1)),
     )
     if not ok:
         return None
@@ -503,13 +560,17 @@ def _remap_and_repair(new_truck, old_truck, drone1_old, drone2_old, pair_explore
 
 
 def operator(current_solution):
+    global _diag_calls, _diag_tsp_improved, _diag_returned_same
     assert_context_is_set()
     truck_times, drone_times, _, depot = get_operator_context()
 
     old_truck, drone1_old, drone2_old = _clone_solution(current_solution)
+    _diag_calls += 1
     new_truck = _optimize_truck_route_with_tsp(old_truck, truck_times, depot)
     if not new_truck or new_truck == old_truck:
+        _diag_returned_same += 1
         return current_solution
+    _diag_tsp_improved += 1
 
     candidates = []
 
@@ -518,10 +579,12 @@ def operator(current_solution):
             score = _sync_penalty(c[0], c[1], c[2], truck_times, drone_times)
             candidates.append((score, c))
 
-    # Strategy 1: clean remap — fully deterministic, try once.
+    # Strategy 1: clean remap — fully deterministic.  Succeeds when the TSP
+    # reorder didn't flip the relative order of any drone endpoint pair.
     _try(_clean_remap(new_truck, old_truck, drone1_old, drone2_old))
 
-    # Strategy 2: remap+repair — run many times with randomness, keep the best.
+    # Strategy 2: remap+repair — run many times with randomness; tries to keep
+    # inverted-trip customers on drones by searching for new valid pairs.
     for _ in range(_REMAP_REPAIR_ATTEMPTS):
         _try(_remap_and_repair(new_truck, old_truck, drone1_old, drone2_old))
 
