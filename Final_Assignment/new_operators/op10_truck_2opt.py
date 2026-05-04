@@ -20,6 +20,105 @@ _EXPLORE_PROB = 0.10
 _SYNC_PEN_WEIGHT = 0.10
 
 
+def _total_arrival_time(truck, drone1, drone2, truck_times, drone_times, flight_range, depot):
+    """Full objective: sum of all customer arrival times / 100. Mirrors
+    CalCulateTotalArrivalTime semantics. Returns inf if infeasible."""
+    n = len(truck)
+    if n < 2:
+        return float("inf")
+    drone_return_map = {}
+    for drone_id, route in enumerate([drone1, drone2]):
+        for customer, launch_idx, return_idx in route:
+            if not (0 <= launch_idx < n and 0 <= return_idx < n and launch_idx < return_idx):
+                return float("inf")
+            drone_return_map.setdefault(return_idx, []).append((drone_id, launch_idx, customer))
+    t_arrival = {truck[0]: 0.0}
+    t_departure = {truck[0]: 0.0}
+    drone_availability = [0.0, 0.0]
+    total = 0.0
+    for i in range(1, n):
+        prev_node = truck[i - 1]
+        curr_node = truck[i]
+        truck_arrival_time = t_departure[prev_node] + truck_times[prev_node][curr_node]
+        t_arrival[curr_node] = truck_arrival_time
+        drone_returns = []
+        for drone_id, launch_idx, customer in drone_return_map.get(i, []):
+            launch_node = truck[launch_idx]
+            flight_out = drone_times[launch_node][customer]
+            flight_back = drone_times[customer][curr_node]
+            total_flight = flight_out + flight_back
+            actual_launch = max(t_arrival[launch_node], drone_availability[drone_id])
+            drone_cust_arrival = actual_launch + flight_out
+            drone_return_time = actual_launch + total_flight
+            drone_availability[drone_id] = drone_return_time
+            drone_returns.append(drone_return_time)
+            total += drone_cust_arrival
+            if curr_node != depot:
+                drone_wait = max(truck_arrival_time - drone_return_time, 0.0)
+            else:
+                drone_wait = 0.0
+            if total_flight + drone_wait > flight_range:
+                return float("inf")
+        if drone_returns:
+            t_departure[curr_node] = max(truck_arrival_time, max(drone_returns))
+        else:
+            t_departure[curr_node] = truck_arrival_time
+        if curr_node != depot:
+            total += truck_arrival_time
+    return total / 100.0
+
+
+def _reoptimize_drone_windows(truck, drone_route, truck_times, drone_times, flight_range,
+                              prev_land_idx_floor=0, next_launch_idx_ceil=None):
+    """For each trip in drone_route (in order), pick the (launch_idx, land_idx)
+    that minimizes the per-trip sync penalty on the new truck route, while
+    respecting the order constraint (each trip's land_idx < next trip's launch_idx).
+
+    Returns the reoptimized drone_route list (or original if infeasible)."""
+    n = len(truck)
+    if n <= 3 or not drone_route:
+        return drone_route
+
+    if next_launch_idx_ceil is None:
+        next_launch_idx_ceil = n - 1
+
+    prefix = [0.0]
+    for i in range(n - 1):
+        prefix.append(prefix[-1] + truck_times[truck[i]][truck[i + 1]])
+
+    new_route = []
+    floor = prev_land_idx_floor
+    remaining = list(drone_route)
+    for k, (cust, _old_launch, _old_land) in enumerate(remaining):
+        # Reserve room: each later trip needs at least (#remaining_after - 1)
+        # ascending land slots after this one's land_idx.
+        remaining_after = len(remaining) - k - 1
+        ceil_for_land = next_launch_idx_ceil - remaining_after
+        best_pair = None
+        best_score = float("inf")
+        for launch_idx in range(floor, n - 1):
+            if launch_idx >= ceil_for_land:
+                break
+            launch_node = truck[launch_idx]
+            for land_idx in range(launch_idx + 1, ceil_for_land + 1):
+                land_node = truck[land_idx]
+                trip = drone_times[launch_node][cust] + drone_times[cust][land_node]
+                if trip > flight_range:
+                    continue
+                truck_time = prefix[land_idx] - prefix[launch_idx]
+                wait_excess = max(0.0, trip - truck_time)
+                mismatch = abs(trip - truck_time)
+                score = 3.0 * wait_excess + 0.6 * mismatch + 0.02 * trip
+                if score < best_score:
+                    best_score = score
+                    best_pair = (launch_idx, land_idx)
+        if best_pair is None:
+            return None
+        new_route.append((cust, best_pair[0], best_pair[1]))
+        floor = best_pair[1] + 1
+    return new_route
+
+
 def set_search_progress(progress):
     return None
 
@@ -149,14 +248,14 @@ def _apply_2opt(truck, i, j):
 
 def operator(current_solution):
     assert_context_is_set()
-    truck_times, drone_times, _, _ = get_operator_context()
+    truck_times, drone_times, flight_range, depot = get_operator_context()
 
     truck, drone1, drone2 = _clone_solution(current_solution)
     if len(truck) <= 5:
         return current_solution
 
-    old_truck_cost = _truck_cost(truck, truck_times)
-    old_sync_pen = _solution_sync_penalty(truck, drone1, drone2, truck_times, drone_times)
+    old_obj = _total_arrival_time(truck, drone1, drone2, truck_times, drone_times,
+                                  flight_range, depot)
 
     sampled_pairs = _sample_2opt_pairs(truck, truck_times)
     if not sampled_pairs:
@@ -168,36 +267,49 @@ def operator(current_solution):
         if new_truck is None or new_truck == truck:
             continue
 
-        drone1_new = remap_drone_route_by_endpoint_nodes(truck, new_truck, drone1)
-        drone2_new = remap_drone_route_by_endpoint_nodes(truck, new_truck, drone2)
+        # Reoptimize drone windows on the new truck route. This is the key
+        # change vs the previous version, which just remapped existing
+        # endpoints — that missed all wins where the reversal *enabled*
+        # a better launch/return pair.
+        drone1_new = _reoptimize_drone_windows(new_truck, drone1, truck_times,
+                                               drone_times, flight_range)
+        drone2_new = _reoptimize_drone_windows(new_truck, drone2, truck_times,
+                                               drone_times, flight_range)
         if drone1_new is None or drone2_new is None:
-            continue
-
-        if not drone_route_is_feasible(drone1_new):
-            drone1_new = repair_drone_route(new_truck, drone1_new, max_repairs=10, max_neighbors=8)
-            if drone1_new is None:
+            # Reoptimization failed — fall back to remap, then evaluate.
+            drone1_new = remap_drone_route_by_endpoint_nodes(truck, new_truck, drone1)
+            drone2_new = remap_drone_route_by_endpoint_nodes(truck, new_truck, drone2)
+            if drone1_new is None or drone2_new is None:
                 continue
-        if not drone_route_is_feasible(drone2_new):
-            drone2_new = repair_drone_route(new_truck, drone2_new, max_repairs=10, max_neighbors=8)
-            if drone2_new is None:
-                continue
+            if not drone_route_is_feasible(drone1_new):
+                drone1_new = repair_drone_route(new_truck, drone1_new, max_repairs=10, max_neighbors=8)
+                if drone1_new is None:
+                    continue
+            if not drone_route_is_feasible(drone2_new):
+                drone2_new = repair_drone_route(new_truck, drone2_new, max_repairs=10, max_neighbors=8)
+                if drone2_new is None:
+                    continue
 
         if not _route_endpoint_unique(drone1_new) or not _route_endpoint_unique(drone2_new):
             continue
 
-        truck_delta = _truck_cost(new_truck, truck_times) - old_truck_cost
-        sync_delta = (
-            _solution_sync_penalty(new_truck, drone1_new, drone2_new, truck_times, drone_times)
-            - old_sync_pen
-        )
-        score = truck_delta + _SYNC_PEN_WEIGHT * sync_delta
-        candidates.append((score, [new_truck, drone1_new, drone2_new]))
+        new_obj = _total_arrival_time(new_truck, drone1_new, drone2_new,
+                                      truck_times, drone_times, flight_range, depot)
+        if new_obj == float("inf"):
+            continue
+        candidates.append((new_obj, [new_truck, drone1_new, drone2_new]))
 
     if not candidates:
         return current_solution
 
     candidates.sort(key=lambda x: x[0])
+    # Only keep candidates that match-or-beat current objective; otherwise
+    # this operator would actively worsen the solution.
+    if candidates[0][0] >= old_obj:
+        return current_solution
     if random.random() < _EXPLORE_PROB:
-        top_k = min(5, len(candidates))
-        return random.choice(candidates[:top_k])[1]
+        # Among improving candidates only.
+        improving = [c for c in candidates if c[0] < old_obj]
+        top_k = min(5, len(improving))
+        return random.choice(improving[:top_k])[1]
     return candidates[0][1]

@@ -30,6 +30,10 @@ import op11_TSP_drone_rebuild as op11
 import op12_truck_drone_swap as op12
 import op13_drone_sync_tuner as op13
 import op15_drone_relocate as op15
+import op16_optimal_drone_assign as op16
+import op17_full_rebuild as op17
+
+import local_search as ls
 
 TEST_FILES_DIR = ASSIGNMENT_DIR.parent / "Test_files"
 file_name = "F_100.txt"
@@ -263,13 +267,13 @@ def configure_operator_context(instance_data):
     D = instance_data["drone_times"]
     fr = instance_data["flight_limit"]
     depot = instance_data.get("depot_index", 0)
-    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13, op15):
+    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13, op15, op16, op17):
         if hasattr(op, "set_operator_context"):
             op.set_operator_context(T, D, fr, depot)
 
 
 def configure_operator_search_progress(progress):
-    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13, op15):
+    for op in (op1, op2, op3, op8, op9, op10, op11, op12, op13, op15, op16, op17):
         if hasattr(op, "set_search_progress"):
             op.set_search_progress(progress)
 
@@ -720,13 +724,30 @@ def _plot_accepted_objective(accepted_objective_points, output_dir, instance_lab
     xs = [int(p[0]) for p in accepted_objective_points]
     ys = [float(p[1]) for p in accepted_objective_points]
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(xs, ys, linewidth=1.2, color="tab:blue", alpha=0.9)
-    ax.scatter(xs, ys, s=8, alpha=0.55, color="tab:blue")
-    ax.set_title(f"Accepted Solutions Objective by Iteration ({instance_label}, {run_label})")
-    ax.set_xlabel("Iteration")
-    ax.set_ylabel("Objective")
-    ax.grid(alpha=0.25)
+    best_so_far = []
+    running = float("inf")
+    for y in ys:
+        if y < running:
+            running = y
+        best_so_far.append(running)
+
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
+    ax_top.plot(xs, ys, linewidth=1.2, color="tab:blue", alpha=0.9)
+    ax_top.scatter(xs, ys, s=8, alpha=0.55, color="tab:blue")
+    ax_top.set_title(f"Accepted Solutions Objective by Iteration ({instance_label}, {run_label})")
+    ax_top.set_ylabel("Accepted objective")
+    ax_top.grid(alpha=0.25)
+
+    ax_bot.plot(xs, best_so_far, linewidth=1.5, color="tab:red")
+    ax_bot.set_title("Best-so-far (running min)")
+    ax_bot.set_xlabel("Iteration")
+    ax_bot.set_ylabel("Best objective")
+    ax_bot.grid(alpha=0.25)
+    if best_so_far:
+        final = best_so_far[-1]
+        ax_bot.axhline(final, color="tab:gray", linestyle="--", linewidth=0.8, alpha=0.7)
+        ax_bot.annotate(f"{final:.1f}", xy=(xs[-1], final), xytext=(-60, 8),
+                        textcoords="offset points", fontsize=9, color="tab:gray")
     plt.tight_layout()
 
     out_file = out_dir / f"accepted_objective_{safe_instance}_{safe_run}.png"
@@ -877,6 +898,10 @@ def apply_main_operator(solution, op_name):
         return op13.operator(solution)
     if op_name == "op15":
         return op15.operator(solution)
+    if op_name == "op16":
+        return op16.operator(solution)
+    if op_name == "op17":
+        return op17.operator(solution)
 
 
 def _truck_removal_gain(truck, idx, truck_times):
@@ -1090,6 +1115,16 @@ def alns_improved(
     collect_acceptance_points=False,
     collect_accepted_objective_points=False,
     rrt_deviation_factor=0.13,
+    rrt_decay_exponent=1.0,
+    time_limit_seconds=None,
+    op_names_override=None,
+    enable_local_search=False,
+    ls_time_budget_seconds=5.0,
+    ls_max_cycles=20,
+    ls_at_new_best=True,
+    ls_at_end=True,
+    ls_end_time_budget_seconds=10.0,
+    ls_ils_passes=1,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -1104,26 +1139,47 @@ def alns_improved(
     # On F_10 (≤15 customers): op3/op8 provide essential diversification —
     # removing them stops the algorithm finding 1412 entirely. Keep all ops.
     n_cust = ctx.get("n_customers", 100)
-    if n_cust <= 15:
+    if op_names_override is not None:
+        op_names = list(op_names_override)
+        if n_cust > 30:
+            rrt_deviation_factor = 0.05
+    elif n_cust <= 15:
         # F_10/R_10 size. Full set so ALNS can adapt per instance type:
         # - F_10: op3/op8/op11 diversify; op12 earns ~0.22 weight for truck↔drone swap
         # - R_10: op13 earns high weight for timing tuning; op12 also helps
         # op13 at floor weight (~0.03) on instances where it doesn't help costs very little.
-        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
+        # op16 disabled: it deterministically converges to the ~807 basin on R_10
+        # (verified across runs), pulling other operators' improvements back into it.
+        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13", "op17"]
     elif 16 <= n_cust <= 30:
         # F_20-size: op12 is very strong (found 3274); op13 helps timing.
         # op3 added: or-opt segment moves help on R instances where single-node
         # relocate (op1) misses improvements requiring two adjacent nodes to move.
-        op_names = ["op1", "op2", "op3", "op10", "op12", "op13"]
-    else:
-        # F_50/F_100/R_50/R_100: op8 and op10 both earn <8k improve/1k with the
-        # tight RRT window and decay to near min_weight floor — remove both.
-        # op15 added: cross-drone relocate explores the drone partition dimension
-        # that no other operator covers (moving customers between drone1/drone2).
-        op_names = ["op1", "op2", "op3", "op11", "op12", "op13", "op15"]
-        # Tighten RRT acceptance: 0.03 brings mid-run window to ~45% of the
-        # remaining gap vs 86% at 0.05, giving tighter, faster convergence.
+        op_names = ["op1", "op2", "op3", "op10", "op12", "op13", "op17"]
+    elif 31 <= n_cust <= 60:
+        # n=50 (R_50/F_50): same op set as n=100 but linear RRT decay.
+        # Convex decay (p=1.5) regresses R_50 by +136 avg (95% CI [+12,+260], sig)
+        # because basin lottery is not the limiter at n=50 — the algorithm finds
+        # good basins reliably and the wider Q1 window just wastes budget.
+        op_names = ["op1", "op2", "op3", "op12", "op13", "op15"]
         rrt_deviation_factor = 0.05
+    else:
+        # F_100/R_100 and contest blind n=100 instances: op8 and op10 both earn
+        # <8k improve/1k with the tight RRT window and decay to near min_weight
+        # floor — remove both. op15 added: cross-drone relocate explores the
+        # drone partition dimension that no other operator covers.
+        # op11/op17 removed: 8-run R_100 ablation -260 avg / -223 best, 4-run
+        # F_100 ablation -1041 avg / -1160 best (new low 28898).
+        op_names = ["op1", "op2", "op3", "op12", "op13", "op15"]
+        # Tighten RRT acceptance: 0.05 (was 0.13 default) gives tighter mid-run
+        # window for faster convergence at n=100.
+        rrt_deviation_factor = 0.05
+        # Convex RRT decay (frac = ((G-g)/G)^1.5) holds the acceptance window
+        # wider through Q1-Q2 to reduce basin-lottery variance. 10x4 head-to-head
+        # showed -avg on F_100/Contest/Contest_new and new all-time lows on F_100
+        # (29005) and Contest_new (22399); std reduced ~15-20% across the four
+        # n=100 datasets. NOT applied at n=50 (regresses R_50 significantly).
+        rrt_decay_exponent = 1.5
 
     eval_cache = shared_eval_cache if shared_eval_cache is not None else OrderedDict()
 
@@ -1166,7 +1222,7 @@ def alns_improved(
     def _rrt_deviation(best_obj, g, G):
         G = max(1, int(G))
         g = max(0, min(int(g), G))
-        frac = (G - g) / G
+        frac = ((G - g) / G) ** float(rrt_decay_exponent)
         return float(rrt_deviation_factor) * frac * max(1.0, float(best_obj))
 
     for w in range(warmup_iterations):
@@ -1285,22 +1341,45 @@ def alns_improved(
         temperature_history.append((warmup_iterations, float(t0)))
 
     escape_calls = 0
+    escape_log = []  # (iter, incumbent_cost_before, incumbent_cost_after, esc_improved_best, best_cost_after)
     escape_feasible_steps = 0
     no_best_improve_steps = 0
     # Warm RRT reset: after each escape, give the new basin a full d₀ acceptance
     # window for this many iterations before resuming normal cooling.
     _WARM_RESET_WINDOW = 500
     escape_warm_reset_until = -1
+    # op11 dynamic suppression: after 20% of iterations, if op11's cumulative
+    # feasibility rate is below 8% cap its weight at 0.05 for the rest of the run.
+    # op11 earns large but infrequent rewards that inflate its ALNS weight far
+    # above what its per-call throughput justifies — suppression corrects this
+    # without imposing any floors or ceilings on other operators.
+    _op11_suppressed = False
+    _op11_suppress_check_iter = max(1, int(iterations * 0.20))
+
+    _time_limited = time_limit_seconds is not None and time_limit_seconds > 0
+    _t_loop_start = time.perf_counter() if _time_limited else 0.0
 
     for it in range(iterations):
+        if _time_limited:
+            _elapsed = time.perf_counter() - _t_loop_start
+            if _elapsed >= time_limit_seconds:
+                break
+            # Drive cooling from elapsed-vs-budget instead of iteration index
+            _virt_total = max(1, int(time_limit_seconds))
+            _virt_step = min(_virt_total, max(1, int(_elapsed)))
         if it <= escape_warm_reset_until:
             # Full initial acceptance window regardless of how far into the run we are.
             rrt_dev = float(rrt_deviation_factor) * max(1.0, float(best_cost))
+        elif _time_limited:
+            rrt_dev = _rrt_deviation(best_cost, _virt_step, _virt_total)
         else:
             rrt_dev = _rrt_deviation(best_cost, it + 1, iterations)
         if collect_temperature_history:
             temperature_history.append((warmup_iterations + it + 1, float(rrt_dev)))
-        configure_operator_search_progress((warmup_iterations + it) / total_steps)
+        if _time_limited:
+            configure_operator_search_progress(min(1.0, _elapsed / time_limit_seconds))
+        else:
+            configure_operator_search_progress((warmup_iterations + it) / total_steps)
         op_name = roulette_pick(weights, op_names)
         stats[op_name]["used"] += 1
         segment_uses[op_name] += 1
@@ -1349,6 +1428,20 @@ def alns_improved(
                 best_cost = incumbent_cost
                 improved_best = True
                 best_found_iteration = warmup_iterations + it + 1
+                if enable_local_search and ls_at_new_best:
+                    ls_sol, ls_cost, _ = ls.local_search(
+                        best_solution,
+                        best_cost,
+                        cached_evaluate,
+                        ctx,
+                        max_cycles=ls_max_cycles,
+                        time_budget_seconds=ls_time_budget_seconds,
+                    )
+                    if ls_cost < best_cost - 1e-9:
+                        best_solution = clone_solution(ls_sol)
+                        best_cost = ls_cost
+                        incumbent = clone_solution(ls_sol)
+                        incumbent_cost = ls_cost
         else:
             stats[op_name]["worse_feasible"] += 1
             can_accept_worse = cand_cost <= (best_cost + rrt_dev)
@@ -1432,32 +1525,37 @@ def alns_improved(
                         updated[k] = weights[k] * (1.0 - 0.35 * reaction_factor)
                     else:
                         updated[k] = weights[k] * (1.0 - reaction_factor)
-            # Caps follow a generalization principle: only constrain operators
-            # that risk structural collapse (LNS/destroy monopolising everything)
-            # or known pathological behaviour on small instances.
-            # Avoid instance-specific tuning — let ALNS adapt weights freely
-            # within wide bounds so the algorithm generalises to unknown instances.
-            if n_cust <= 15:
-                # Keep op2 bounded (LNS too noisy to monopolise small instances).
-                # Keep op8 floor alive for the diversification it provides.
-                # op12 allowed up to 0.30 — enough room on both R and F types.
-                # All other operators: no upper cap, let ALNS decide.
-                _upper = {"op2": 0.35, "op8": 0.15, "op12": 0.30}
-                _lower = {"op2": 0.05, "op8": 0.04}
-            elif n_cust <= 30:
-                # op3 capped at 0.22 so it cannot fully displace op12 on F
-                # instances (where op12 is the dominant contributor).
-                # op12 allowed up to 0.35 — it earns this on structured instances.
-                _upper = {"op2": 0.40, "op3": 0.22, "op12": 0.35}
-                _lower = {"op2": 0.05}
-            else:
-                # Large instances: only cap op2 (LNS can't monopolise) and op12
-                # (allow up to 0.40 — earns it on many instances).
-                # No caps on op11/op13/op15: ALNS allocates these based on
-                # what the specific instance rewards, which is exactly the
-                # right generalisation behaviour.
-                _upper = {"op2": 0.40, "op12": 0.40}
-                _lower = {"op2": 0.05}
+            # No floors or ceilings — let ALNS weight operators freely.
+            # Exception 1: op11 is suppressed if its feasibility is too low,
+            # because rare large rewards inflate its ALNS weight well above
+            # what its per-call throughput justifies.
+            # Exception 2: op16 is capped at 0.20 to prevent it from dominating
+            # on small instances.  Op16 finds the local optimum of drone
+            # assignment in the very first few calls (100% improvement rate),
+            # which gives it runaway weight and starves other operators that
+            # need to explore different truck routes to escape the basin.
+            _upper = {}
+            _lower = {}
+            _suppress_check_due = (
+                _elapsed >= 0.20 * time_limit_seconds
+                if _time_limited
+                else (it + 1) >= _op11_suppress_check_iter
+            )
+            if (
+                "op11" in op_names
+                and not _op11_suppressed
+                and _suppress_check_due
+            ):
+                op11_used = stats["op11"]["used"]
+                op11_feasible = stats["op11"]["feasible"]
+                if op11_used >= 50 and (op11_feasible / op11_used) < 0.08:
+                    _op11_suppressed = True
+            if _op11_suppressed:
+                _upper["op11"] = 0.05
+            if "op16" in op_names:
+                # Cap at 0.25: op16 fires first at 25% of iterations, and after
+                # that its 100% improvement rate would otherwise dominate the budget.
+                _upper["op16"] = 0.25
             weights = _normalize_weight_dict_with_caps(
                 updated,
                 min_weight=0.03,
@@ -1471,6 +1569,7 @@ def alns_improved(
 
         if no_best_improve_steps >= escape_stall_limit:
             escape_calls += 1
+            _esc_inc_before = incumbent_cost
             incumbent, incumbent_cost, esc_improved_best, esc_steps = _escape_with_related_large(
                 incumbent,
                 incumbent_cost,
@@ -1484,6 +1583,13 @@ def alns_improved(
                 best_solution = clone_solution(incumbent)
                 best_cost = incumbent_cost
                 best_found_iteration = warmup_iterations + it + 1
+            escape_log.append((
+                warmup_iterations + it + 1,
+                float(_esc_inc_before),
+                float(incumbent_cost),
+                bool(esc_improved_best),
+                float(best_cost),
+            ))
             # Always reset stall counter so ALNS has a full window to explore
             # from the escaped position before triggering again.
             no_best_improve_steps = 0
@@ -1507,6 +1613,7 @@ def alns_improved(
         "weight_history": weight_history,
         "escape_calls": escape_calls,
         "escape_feasible_steps": escape_feasible_steps,
+        "escape_log": escape_log,
         "accepted_snapshots": accepted_snapshots,
         "periodic_snapshots": periodic_snapshots,
         "best_found_iteration": best_found_iteration,
@@ -1515,6 +1622,44 @@ def alns_improved(
         "acceptance_points": acceptance_points,
         "accepted_objective_points": accepted_objective_points,
     }
+
+    if enable_local_search and ls_at_end:
+        ils_deadline = time.perf_counter() + ls_end_time_budget_seconds
+        per_pass_budget = ls_end_time_budget_seconds / max(1, ls_ils_passes)
+
+        ls_sol, ls_cost, _ = ls.local_search(
+            best_solution,
+            best_cost,
+            cached_evaluate,
+            ctx,
+            max_cycles=ls_max_cycles,
+            time_budget_seconds=per_pass_budget,
+        )
+        if ls_cost < best_cost - 1e-9:
+            best_solution = clone_solution(ls_sol)
+            best_cost = ls_cost
+
+        for _pass in range(max(0, ls_ils_passes - 1)):
+            if time.perf_counter() >= ils_deadline:
+                break
+            perturbed = op14.operator(best_solution)
+            feasible_p, p_cost = cached_evaluate(perturbed)
+            if not feasible_p:
+                continue
+            remaining = ils_deadline - time.perf_counter()
+            if remaining <= 0.5:
+                break
+            ls_sol, ls_cost, _ = ls.local_search(
+                perturbed,
+                p_cost,
+                cached_evaluate,
+                ctx,
+                max_cycles=ls_max_cycles,
+                time_budget_seconds=min(per_pass_budget, remaining),
+            )
+            if ls_cost < best_cost - 1e-9:
+                best_solution = clone_solution(ls_sol)
+                best_cost = ls_cost
 
     return best_solution, best_cost, stats
 
@@ -1553,7 +1698,7 @@ def run_statistics(
     temperature_plot_output_dir=None,
     plot_acceptance_probability_best_run=False,
     acceptance_probability_output_dir=None,
-    plot_accepted_objective_best_run=False,
+    plot_accepted_objective_best_run=True,
     accepted_objective_output_dir=None,
     temperature_threshold=1.0,
     save_best_runs_log=False,
@@ -1561,6 +1706,16 @@ def run_statistics(
     solution_factory=None,
     save_best_solution_plot=False,
     best_solution_plot_output_dir=None,
+    time_limit_seconds=None,
+    op_names_override=None,
+    rrt_decay_exponent=1.0,
+    enable_local_search=False,
+    ls_time_budget_seconds=5.0,
+    ls_max_cycles=20,
+    ls_at_new_best=True,
+    ls_at_end=True,
+    ls_end_time_budget_seconds=10.0,
+    ls_ils_passes=1,
 ):
     if instance_data is None:
         instance_data = load_instance()
@@ -1569,12 +1724,29 @@ def run_statistics(
     configure_operator_context(instance_data)
 
     n_cust = ctx.get("n_customers", 100)
-    if n_cust <= 15:
-        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13"]
+    if op_names_override is not None:
+        op_names = list(op_names_override)
+    elif n_cust <= 15:
+        op_names = ["op1", "op2", "op3", "op8", "op10", "op11", "op12", "op13", "op17"]
     elif 16 <= n_cust <= 30:
-        op_names = ["op1", "op2", "op3", "op10", "op12", "op13"]
+        op_names = ["op1", "op2", "op3", "op10", "op12", "op13", "op17"]
     else:
-        op_names = ["op1", "op2", "op3", "op11", "op12", "op13", "op15"]
+        op_names = ["op1", "op2", "op3", "op12", "op13", "op15"]
+
+    if not enable_local_search:
+        enable_local_search = True
+        ls_at_new_best = False
+        ls_at_end = True
+        if n_cust > 30:
+            if ls_end_time_budget_seconds < 40.0:
+                ls_end_time_budget_seconds = 40.0
+            if ls_max_cycles < 30:
+                ls_max_cycles = 30
+        else:
+            if ls_end_time_budget_seconds < 10.0:
+                ls_end_time_budget_seconds = 10.0
+            if ls_max_cycles < 20:
+                ls_max_cycles = 20
 
     _check_sol = solution_factory() if solution_factory is not None else initial_solution
     init_feasible, init_cost = evaluate_solution(_check_sol, calc, checker)
@@ -1607,6 +1779,7 @@ def run_statistics(
     best_run_temperature_history = None
     best_run_acceptance_points = None
     best_run_accepted_objective_points = None
+    best_run_escape_log = None
     best_run_index = None
     threshold_cross_iterations = []
     run_best_records = []
@@ -1646,6 +1819,16 @@ def run_statistics(
             collect_temperature_history=plot_temperature_best_run,
             collect_acceptance_points=plot_acceptance_probability_best_run,
             collect_accepted_objective_points=plot_accepted_objective_best_run,
+            time_limit_seconds=time_limit_seconds,
+            op_names_override=op_names_override,
+            rrt_decay_exponent=rrt_decay_exponent,
+            enable_local_search=enable_local_search,
+            ls_time_budget_seconds=ls_time_budget_seconds,
+            ls_max_cycles=ls_max_cycles,
+            ls_at_new_best=ls_at_new_best,
+            ls_at_end=ls_at_end,
+            ls_end_time_budget_seconds=ls_end_time_budget_seconds,
+            ls_ils_passes=ls_ils_passes,
         )
         elapsed = time.perf_counter() - start
 
@@ -1727,6 +1910,7 @@ def run_statistics(
             best_run_temperature_history = best_run_meta.get("temperature_history", None)
             best_run_acceptance_points = best_run_meta.get("acceptance_points", None)
             best_run_accepted_objective_points = best_run_meta.get("accepted_objective_points", None)
+            best_run_escape_log = best_run_meta.get("escape_log", None)
             best_run_index = run_id + 1
 
     avg_obj = sum(run_costs) / len(run_costs)
@@ -1767,6 +1951,9 @@ def run_statistics(
             sum(x for x in threshold_cross_iterations if x > 0)
             / max(1, len([x for x in threshold_cross_iterations if x > 0]))
         ) if threshold_cross_iterations else 0.0,
+        "accepted_objective_points": best_run_accepted_objective_points,
+        "aggregate_stats": aggregate_stats,
+        "escape_log": best_run_escape_log,
     }
 
     delta_plot_files = []
@@ -2027,11 +2214,11 @@ def _run_params(n_customers):
     if n_customers <= 15:
         return 500, 19500, max(150, 4 * n_customers), max(15, n_customers)
     elif n_customers <= 30:
-        return 500, 9500, max(200, 6 * n_customers), max(20, n_customers)
+        return 500, 25000, max(200, 6 * n_customers), max(20, n_customers)
     elif n_customers <= 60:
-        return 500, 34500, 1000, max(20, n_customers)
+        return 500, 50000, 1000, max(20, n_customers)
     else:
-        return 500, 34500, 1000, max(20, n_customers)
+        return 500, 50000, 1000, max(20, n_customers)
 
 
 def main():

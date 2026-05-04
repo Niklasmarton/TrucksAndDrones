@@ -1,5 +1,6 @@
 from itertools import combinations
 from pathlib import Path
+import random
 import sys
 
 ASSIGNMENT_DIR = Path(__file__).resolve().parents[1]
@@ -97,6 +98,54 @@ def _sync_penalty(truck, drone1, drone2, truck_times, drone_times):
     return pen
 
 
+def _total_arrival_time(truck, drone1, drone2, truck_times, drone_times, flight_range, depot):
+    """Full objective: sum of all customer arrival times / 100. Mirrors
+    CalCulateTotalArrivalTime semantics. Returns inf if infeasible."""
+    n = len(truck)
+    if n < 2:
+        return float("inf")
+    drone_return_map = {}
+    for drone_id, route in enumerate([drone1, drone2]):
+        for customer, launch_idx, return_idx in route:
+            if not (0 <= launch_idx < n and 0 <= return_idx < n and launch_idx < return_idx):
+                return float("inf")
+            drone_return_map.setdefault(return_idx, []).append((drone_id, launch_idx, customer))
+    t_arrival = {truck[0]: 0.0}
+    t_departure = {truck[0]: 0.0}
+    drone_availability = [0.0, 0.0]
+    total = 0.0
+    for i in range(1, n):
+        prev_node = truck[i - 1]
+        curr_node = truck[i]
+        truck_arrival_time = t_departure[prev_node] + truck_times[prev_node][curr_node]
+        t_arrival[curr_node] = truck_arrival_time
+        drone_returns = []
+        for drone_id, launch_idx, customer in drone_return_map.get(i, []):
+            launch_node = truck[launch_idx]
+            flight_out = drone_times[launch_node][customer]
+            flight_back = drone_times[customer][curr_node]
+            total_flight = flight_out + flight_back
+            actual_launch = max(t_arrival[launch_node], drone_availability[drone_id])
+            drone_cust_arrival = actual_launch + flight_out
+            drone_return_time = actual_launch + total_flight
+            drone_availability[drone_id] = drone_return_time
+            drone_returns.append(drone_return_time)
+            total += drone_cust_arrival
+            if curr_node != depot:
+                drone_wait = max(truck_arrival_time - drone_return_time, 0.0)
+            else:
+                drone_wait = 0.0
+            if total_flight + drone_wait > flight_range:
+                return float("inf")
+        if drone_returns:
+            t_departure[curr_node] = max(truck_arrival_time, max(drone_returns))
+        else:
+            t_departure[curr_node] = truck_arrival_time
+        if curr_node != depot:
+            total += truck_arrival_time
+    return total / 100.0
+
+
 def _clone_solution(solution):
     return [solution[0][:], solution[1][:], solution[2][:]]
 
@@ -128,6 +177,55 @@ def _nearest_neighbor_route(nodes, truck_times, depot):
         current = nxt
     route.append(depot)
     return route
+
+
+def _nearest_neighbor_from(start, nodes, truck_times):
+    """NN tour starting at `start`, visiting `nodes`, returning to `start`."""
+    unvisited = set(nodes)
+    unvisited.discard(start)
+    route = [start]
+    current = start
+    while unvisited:
+        nxt = min(unvisited, key=lambda n: truck_times[current][n])
+        route.append(nxt)
+        unvisited.remove(nxt)
+        current = nxt
+    route.append(start)
+    return route
+
+
+def _multi_start_nn_2opt(nodes, truck_times, depot, n_extra_starts=3):
+    """Multi-start NN + 2-opt. Tries depot + up to n_extra_starts random
+    non-depot starts, 2-opts each, and keeps the best closed route at depot."""
+    if depot not in nodes or len(nodes) <= 2:
+        return None
+
+    starts = [depot]
+    others = [n for n in nodes if n != depot]
+    if others:
+        random.shuffle(others)
+        starts.extend(others[:n_extra_starts])
+
+    best_route = None
+    best_cost = float("inf")
+    for start in starts:
+        tour = _nearest_neighbor_from(start, nodes, truck_times)
+        # Rotate so depot is at the front (tour is a closed cycle, last == first).
+        if start != depot:
+            try:
+                p = tour.index(depot)
+            except ValueError:
+                continue
+            # tour is [start, ..., start]; cut last element, rotate, re-close at depot.
+            cycle = tour[:-1]
+            rotated = cycle[p:] + cycle[:p]
+            tour = rotated + [depot]
+        improved = _two_opt(tour, truck_times, max_passes=40)
+        cost = _route_cost(improved, truck_times)
+        if cost < best_cost:
+            best_cost = cost
+            best_route = improved
+    return best_route
 
 
 def _two_opt(route, truck_times, max_passes=30):
@@ -253,12 +351,12 @@ def _solve_with_gurobi(nodes, truck_times, depot):
 
 def _solve_with_ortools(nodes, truck_times, depot):
     if not _ortools_available or len(nodes) <= 2:
-        return None
+        return None, None
 
     idx_of = {node: i for i, node in enumerate(nodes)}
     depot_idx = idx_of.get(depot)
     if depot_idx is None:
-        return None
+        return None, None
 
     n = len(nodes)
     # Scale floats to integers (OR-Tools requires integer arc costs).
@@ -327,19 +425,19 @@ def _optimize_truck_route_with_tsp(truck, truck_times, depot):
 
     old_cost = _route_cost(truck, truck_times)
 
-    ortools_route, status = _solve_with_ortools(nodes, truck_times, depot)
-    if ortools_route is not None:
-        # status: 1=optimal, 2=feasible(not proven optimal), 3=time-limit
-        if status == 1:
-            _diag_ortools_optimal += 1
-        elif status == 3:
-            _diag_ortools_timeout += 1
-        new_cost = _route_cost(ortools_route, truck_times)
+    # Multi-start NN + 2-opt: empirically beats OR-Tools on R-type instances
+    # (random spatial layouts) because its stochastic variation between calls
+    # gives op11 multiple route geometries to pick from over the run, rather
+    # than always converging to the single truck-distance-optimal route.
+    msr = _multi_start_nn_2opt(nodes, truck_times, depot, n_extra_starts=3)
+    if msr is not None:
+        new_cost = _route_cost(msr, truck_times)
         if new_cost < old_cost:
             _diag_cost_improvements.append(old_cost - new_cost)
-        return ortools_route
+        _diag_ortools_fallback += 1  # repurposed as "non-OR-Tools path used"
+        return msr
 
-    _diag_ortools_fallback += 1
+    # Last-resort fallback: single-start NN + 2-opt.
     heuristic = _nearest_neighbor_route(nodes, truck_times, depot)
     heuristic = _two_opt(heuristic, truck_times, max_passes=40)
     new_cost = _route_cost(heuristic, truck_times)
@@ -562,26 +660,41 @@ def _remap_and_repair(new_truck, old_truck, drone1_old, drone2_old, pair_explore
 def operator(current_solution):
     global _diag_calls, _diag_tsp_improved, _diag_returned_same
     assert_context_is_set()
-    truck_times, drone_times, _, depot = get_operator_context()
+    truck_times, drone_times, flight_range, depot = get_operator_context()
 
     old_truck, drone1_old, drone2_old = _clone_solution(current_solution)
     _diag_calls += 1
+
+    current_obj = _total_arrival_time(
+        old_truck, drone1_old, drone2_old, truck_times, drone_times, flight_range, depot
+    )
+
     new_truck = _optimize_truck_route_with_tsp(old_truck, truck_times, depot)
     if not new_truck or new_truck == old_truck:
         _diag_returned_same += 1
         return current_solution
     _diag_tsp_improved += 1
 
+    # B: short-circuit on clean_remap success. When the TSP reorder didn't flip
+    # any drone endpoint pair, the drone structure is preserved exactly. If the
+    # resulting solution beats current, return it immediately — the 18 noisy
+    # rebuild attempts can't do better than a structurally-preserved improvement.
     candidates = []
+    clean = _clean_remap(new_truck, old_truck, drone1_old, drone2_old)
+    if clean is not None:
+        clean_obj = _total_arrival_time(
+            clean[0], clean[1], clean[2], truck_times, drone_times, flight_range, depot
+        )
+        if clean_obj < current_obj:
+            return clean
+        if clean_obj != float("inf"):
+            candidates.append((clean_obj, clean))
 
     def _try(c):
         if c is not None and c != current_solution:
-            score = _sync_penalty(c[0], c[1], c[2], truck_times, drone_times)
-            candidates.append((score, c))
-
-    # Strategy 1: clean remap — fully deterministic.  Succeeds when the TSP
-    # reorder didn't flip the relative order of any drone endpoint pair.
-    _try(_clean_remap(new_truck, old_truck, drone1_old, drone2_old))
+            obj = _total_arrival_time(c[0], c[1], c[2], truck_times, drone_times, flight_range, depot)
+            if obj != float("inf"):
+                candidates.append((obj, c))
 
     # Strategy 2: remap+repair — run many times with randomness; tries to keep
     # inverted-trip customers on drones by searching for new valid pairs.
@@ -597,4 +710,8 @@ def operator(current_solution):
         return current_solution
 
     candidates.sort(key=lambda x: x[0])
+    # A: only return improving candidates. If the best we found is worse than
+    # current, return current_solution so ALNS doesn't see a forced uphill move.
+    if candidates[0][0] >= current_obj:
+        return current_solution
     return candidates[0][1]

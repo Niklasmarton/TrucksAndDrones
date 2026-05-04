@@ -92,8 +92,9 @@ def _shift_route_after_truck_removal(route, removed_idx):
 def _destroy_size(truck_len):
     # Tiers are based on current truck customer count (not total n_customers),
     # so the destroy size adapts as customers migrate to drone routes.
-    # Tested values: >3 nodes hurts feasibility on F_100 (48%→39%); the
-    # current tiers keep the right balance for all tested sizes.
+    # Tested values: destroy 5 caused deep disruption (best-at-last-iter on
+    # R_100/Contest, 24959 vs 21710 avg) — the early-run disruption cost
+    # outweighs the larger neighbourhood. Max 3 is the right balance.
     n_customers = max(0, truck_len - 2)
     if n_customers <= 10:
         return 1
@@ -142,17 +143,16 @@ def _pick_destroy_indices(truck, drone1, drone2, truck_times, depot, count):
     return sorted(chosen)
 
 
-def _best_truck_insert(node, truck, truck_times):
-    best_delta = None
-    best_idx = None
+def _top_truck_inserts(node, truck, truck_times, top_k=3):
+    """Return up to top_k (delta, ins_idx) truck insertion options sorted best-first."""
+    scored = []
     for ins_idx in range(1, len(truck)):
         a = truck[ins_idx - 1]
         b = truck[ins_idx]
         delta = truck_times[a][node] + truck_times[node][b] - truck_times[a][b]
-        if best_delta is None or delta < best_delta:
-            best_delta = delta
-            best_idx = ins_idx
-    return best_delta, best_idx
+        scored.append((delta, ins_idx))
+    scored.sort()
+    return scored[:top_k]
 
 
 def _drone_trip_penalty(node, pair, truck, truck_times, drone_times):
@@ -238,9 +238,9 @@ def _drone_phase_penalty():
 def _node_insertion_options(node, truck, drone1, drone2, truck_times, drone_times):
     options = []
 
-    truck_delta, truck_ins_idx = _best_truck_insert(node, truck, truck_times)
-    if truck_ins_idx is not None:
-        options.append((truck_delta, "truck", truck_ins_idx))
+    # Add top-3 truck positions so the repair isn't forced into a single greedy choice.
+    for delta, ins_idx in _top_truck_inserts(node, truck, truck_times, top_k=3):
+        options.append((delta, "truck", ins_idx))
 
     drone_candidates = _candidate_drone_inserts(
         node, truck, drone1, drone2, truck_times, drone_times
@@ -252,6 +252,30 @@ def _node_insertion_options(node, truck, drone1, drone2, truck_times, drone_time
 
     options.sort(key=lambda x: x[0])
     return options
+
+
+def _vehicle_regret(node, truck, drone1, drone2, truck_times, drone_times):
+    """Compute vehicle-level regret-2: |best_truck - best_drone|.
+    Returns (regret, best_truck_opts, best_drone_opts, prefer_truck).
+    """
+    truck_opts = _top_truck_inserts(node, truck, truck_times, top_k=3)
+    truck_cost = truck_opts[0][0] if truck_opts else None
+
+    drone_cands = _candidate_drone_inserts(
+        node, truck, drone1, drone2, truck_times, drone_times
+    )
+    drone_phase_pen = _drone_phase_penalty()
+    drone_cost = (drone_cands[0][0] + drone_phase_pen) if drone_cands else None
+
+    if truck_cost is None and drone_cost is None:
+        return None
+    if truck_cost is None:
+        return float("inf"), None, drone_cands, False
+    if drone_cost is None:
+        return float("inf"), truck_opts, None, True
+    regret = abs(truck_cost - drone_cost)
+    prefer_truck = truck_cost <= drone_cost
+    return regret, truck_opts, drone_cands, prefer_truck
 
 
 def operator(current_solution):
@@ -286,44 +310,58 @@ def operator(current_solution):
 
     pending_nodes = removed_nodes[:]
     while pending_nodes:
-        best_choice = None
+        # Vehicle Regret-2: rank pending nodes by |best_truck_cost - best_drone_cost|.
+        # The "most decisive" node (largest regret) is placed first into its
+        # cheaper vehicle, so we don't waste good slots on indifferent nodes.
         best_node = None
+        best_regret = -1.0
+        best_truck_opts = None
+        best_drone_cands = None
+        best_prefer_truck = True
 
         for node in pending_nodes:
-            options = _node_insertion_options(
-                node, truck, drone1, drone2, truck_times, drone_times
-            )
-            if not options:
+            r = _vehicle_regret(node, truck, drone1, drone2, truck_times, drone_times)
+            if r is None:
                 continue
-
-            best_opt = options[0]
-            best_cost = best_opt[0]
-            second_cost = options[1][0] if len(options) > 1 else (best_cost + 250.0)
-            regret = second_cost - best_cost
-
-            # Regret-2: insert first the node that would hurt most if postponed.
-            # Tie-break by lower best insertion cost.
-            cand = (regret, -best_cost, best_opt, node)
-            if best_choice is None or cand[0] > best_choice[0] or (
-                cand[0] == best_choice[0] and cand[1] > best_choice[1]
-            ):
-                best_choice = cand
+            regret, truck_opts, drone_cands, prefer_truck = r
+            if regret > best_regret:
+                best_regret = regret
                 best_node = node
+                best_truck_opts = truck_opts
+                best_drone_cands = drone_cands
+                best_prefer_truck = prefer_truck
 
-        if best_choice is None:
+        if best_node is None:
             return current_solution
 
-        _, _, chosen_opt, _ = best_choice
-        _, mode, *data = chosen_opt
-        if mode == "truck":
-            truck_ins_idx = data[0]
-            truck = truck[:truck_ins_idx] + [best_node] + truck[truck_ins_idx:]
-        else:
-            best_route_id, best_new_target = data
-            if best_route_id == 1:
-                drone1 = best_new_target
+        # Insert into the preferred vehicle, with rank-biased pick within it
+        # to preserve some stochastic exploration of position choice.
+        if best_prefer_truck and best_truck_opts:
+            chosen = _rank_biased_pick(best_truck_opts, top_k=min(3, len(best_truck_opts)))
+            _, ins_idx = chosen
+            truck = truck[:ins_idx] + [best_node] + truck[ins_idx:]
+        elif best_drone_cands:
+            chosen = _rank_biased_pick(best_drone_cands, top_k=min(3, len(best_drone_cands)))
+            _, route_id, new_target = chosen
+            if route_id == 1:
+                drone1 = new_target
             else:
-                drone2 = best_new_target
+                drone2 = new_target
+        else:
+            # Preferred vehicle had no options; fall back to the other.
+            if best_truck_opts:
+                chosen = _rank_biased_pick(best_truck_opts, top_k=min(3, len(best_truck_opts)))
+                _, ins_idx = chosen
+                truck = truck[:ins_idx] + [best_node] + truck[ins_idx:]
+            elif best_drone_cands:
+                chosen = _rank_biased_pick(best_drone_cands, top_k=min(3, len(best_drone_cands)))
+                _, route_id, new_target = chosen
+                if route_id == 1:
+                    drone1 = new_target
+                else:
+                    drone2 = new_target
+            else:
+                return current_solution
 
         pending_nodes.remove(best_node)
 
