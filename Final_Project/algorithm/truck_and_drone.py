@@ -569,7 +569,8 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
                   sigma_small_improve=1.0, sigma_uphill_accepted=0.6,
                   enable_local_search=True,
                   ls_max_cycles=None,
-                  ls_end_time_budget_seconds=None):
+                  ls_end_time_budget_seconds=None,
+                  progress_label=""):
     # one ALNS run with end-of-run local search.
     # returns (best_solution, best_cost).
     # size-tiered operator set + RRT acceptance + double-bridge escape.
@@ -673,11 +674,16 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
     _op6_suppressed = False
 
     _t_loop_start = time.perf_counter()
+    _next_progress_min = 1
+    _progress_prefix = f"[{progress_label}] " if progress_label else ""
 
     for it in range(iterations):
         _elapsed = time.perf_counter() - _t_loop_start
         if _elapsed >= time_limit_seconds:
             break
+        if _elapsed >= 60.0 * _next_progress_min:
+            print(f"{_progress_prefix}t={_next_progress_min}min  best={best_cost:.2f}", flush=True)
+            _next_progress_min += 1
         _virt_total = max(1, int(time_limit_seconds))
         _virt_step = min(_virt_total, max(1, int(_elapsed)))
 
@@ -825,10 +831,12 @@ def solve(instance_path, time_limit_seconds=600.0, seed=None):
 
     initial = build_initial_solution(instance_data)
 
+    instance_label = Path(instance_path).name
     t0 = time.perf_counter()
     best_solution, best_cost = alns_improved(
         initial, instance_data, ctx, calc, checker,
         time_limit_seconds=time_limit_seconds,
+        progress_label=instance_label,
     )
     runtime = time.perf_counter() - t0
 
