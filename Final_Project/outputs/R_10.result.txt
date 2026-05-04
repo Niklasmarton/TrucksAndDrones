@@ -1,0 +1,5 @@
+instance: R_10.txt
+customers: 10
+best_objective: 595.00
+runtime_seconds: 600.67
+pipe: 0,2,4,8,7,5,1,0 | 10,6,-1,9,3 | 1,2,-1,2,4 | 2,8,-1,4,6
