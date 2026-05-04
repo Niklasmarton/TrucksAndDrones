@@ -111,11 +111,9 @@ def instance(instance_path: str):
     return T, D, current, ending, truck_route, search_queue
 
 
+# compatibility wrapper used by op.py and local_search.py.
+# returns a dict with the expected keys.
 def read_instance(instance_path: str):
-    """
-    Compatibility wrapper used by op.py and local_search.py.
-    Returns a dictionary with expected keys.
-    """
     parsed = _parse_instance_file(instance_path)
     n_customers = parsed["n_customers"]
 

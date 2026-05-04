@@ -1,31 +1,3 @@
-"""
-op15 — cross-drone relocate
-
-Moves one drone trip from drone1 to drone2 (or vice versa), changing
-the partition of which customers are served by each drone.
-
-Why this fills a gap:
-  Every current operator leaves the drone partition essentially fixed:
-    - op12 swaps truck↔drone (partition between truck and drones)
-    - op13 retunes launch/land pairs within a fixed drone assignment
-    - op2/op14 can change assignments indirectly, but only as a side-effect
-  No operator directly moves a customer from drone1 to drone2 or vice versa.
-  op15 is the only operator that specifically explores this dimension.
-
-Selection strategy:
-  Score every drone trip by sync quality (hover penalty + mismatch, same
-  formula as op13).  Pick the worst-synced trip first — it is most likely
-  to benefit from the different launch/land opportunities available from
-  its new position in the other drone route.
-
-  Try up to MAX_ATTEMPTS worst trips.  Return the first successful move;
-  ALNS handles whether the objective improvement justifies acceptance.
-
-Feasibility:
-  After removal, the source route is re-checked with drone_route_is_feasible.
-  The target route is rebuilt with build_drone_pair at every insertion
-  position and validated before returning.
-"""
 import random
 from pathlib import Path
 import sys
@@ -61,8 +33,8 @@ def _route_endpoint_unique(route):
     return True
 
 
+# lower = better drone/truck sync
 def _trip_sync_score(node, launch_idx, land_idx, truck, T, D):
-    """Lower = better sync. Matches op13's scoring formula."""
     if not (0 <= launch_idx < land_idx < len(truck)):
         return float("inf")
     lnode = truck[launch_idx]
@@ -74,11 +46,8 @@ def _trip_sync_score(node, launch_idx, land_idx, truck, T, D):
     return 2.0 * hover_penalty + 0.5 * mismatch + 0.01 * drone_flight
 
 
+# try every insertion position, returns the updated route or None
 def _try_insert_into_route(node, target_route, truck):
-    """
-    Try inserting node into target_route at every position.
-    Returns updated target_route on success, None on failure.
-    """
     positions = list(range(len(target_route) + 1))
     if random.random() < _EXPLORE_PROB:
         random.shuffle(positions)
@@ -115,11 +84,11 @@ def operator(current_solution):
 
     truck, drone1, drone2 = current_solution
 
-    # Need both routes non-empty — a move requires a source and a target.
+    # need both routes non-empty, a move needs a source and a target
     if not drone1 or not drone2:
         return current_solution
 
-    # Score all trips from both drones, worst-first.
+    # rank trips on both drones, worst sync first
     scored = []
     for route_id, route in ((1, drone1), (2, drone2)):
         for node, l, r in route:
@@ -131,7 +100,7 @@ def operator(current_solution):
 
     scored.sort(reverse=True)
 
-    # Optionally shuffle within the top pool for exploration.
+    # occasional shuffle within the top pool to explore
     if random.random() < _EXPLORE_PROB:
         top_k = min(len(scored), max(_MAX_ATTEMPTS * 2, 4))
         pool = scored[:top_k]
@@ -144,14 +113,12 @@ def operator(current_solution):
         source = drone1 if route_id == 1 else drone2
         target = drone2 if route_id == 1 else drone1
 
-        # Remove from source route.
+        # drop the node from its source route
         new_source = [t for t in source if t[0] != node]
 
-        # Source must still be valid after removal.
         if not drone_route_is_feasible(new_source):
             continue
 
-        # Try inserting into target route.
         new_target = _try_insert_into_route(node, target, truck)
         if new_target is None:
             continue

@@ -20,9 +20,9 @@ _EXPLORE_PROB = 0.10
 _SYNC_PEN_WEIGHT = 0.10
 
 
+# sum of all customer arrival times / 100, same semantics as CalCulateTotalArrivalTime.
+# returns inf when the solution is infeasible.
 def _total_arrival_time(truck, drone1, drone2, truck_times, drone_times, flight_range, depot):
-    """Full objective: sum of all customer arrival times / 100. Mirrors
-    CalCulateTotalArrivalTime semantics. Returns inf if infeasible."""
     n = len(truck)
     if n < 2:
         return float("inf")
@@ -68,13 +68,10 @@ def _total_arrival_time(truck, drone1, drone2, truck_times, drone_times, flight_
     return total / 100.0
 
 
+# for each trip pick (launch_idx, land_idx) that minimizes the sync penalty
+# on the new truck route, keeping the order constraint between trips.
 def _reoptimize_drone_windows(truck, drone_route, truck_times, drone_times, flight_range,
                               prev_land_idx_floor=0, next_launch_idx_ceil=None):
-    """For each trip in drone_route (in order), pick the (launch_idx, land_idx)
-    that minimizes the per-trip sync penalty on the new truck route, while
-    respecting the order constraint (each trip's land_idx < next trip's launch_idx).
-
-    Returns the reoptimized drone_route list (or original if infeasible)."""
     n = len(truck)
     if n <= 3 or not drone_route:
         return drone_route
@@ -90,8 +87,7 @@ def _reoptimize_drone_windows(truck, drone_route, truck_times, drone_times, flig
     floor = prev_land_idx_floor
     remaining = list(drone_route)
     for k, (cust, _old_launch, _old_land) in enumerate(remaining):
-        # Reserve room: each later trip needs at least (#remaining_after - 1)
-        # ascending land slots after this one's land_idx.
+        # reserve room for the trips that come after this one
         remaining_after = len(remaining) - k - 1
         ceil_for_land = next_launch_idx_ceil - remaining_after
         best_pair = None
@@ -267,16 +263,14 @@ def operator(current_solution):
         if new_truck is None or new_truck == truck:
             continue
 
-        # Reoptimize drone windows on the new truck route. This is the key
-        # change vs the previous version, which just remapped existing
-        # endpoints — that missed all wins where the reversal *enabled*
-        # a better launch/return pair.
+        # rebuild drone windows on the new truck route, since a reversal
+        # often opens up a better launch/return pair than just remapping
         drone1_new = _reoptimize_drone_windows(new_truck, drone1, truck_times,
                                                drone_times, flight_range)
         drone2_new = _reoptimize_drone_windows(new_truck, drone2, truck_times,
                                                drone_times, flight_range)
         if drone1_new is None or drone2_new is None:
-            # Reoptimization failed — fall back to remap, then evaluate.
+            # rebuild failed, fall back to plain remap + repair
             drone1_new = remap_drone_route_by_endpoint_nodes(truck, new_truck, drone1)
             drone2_new = remap_drone_route_by_endpoint_nodes(truck, new_truck, drone2)
             if drone1_new is None or drone2_new is None:
@@ -303,12 +297,10 @@ def operator(current_solution):
         return current_solution
 
     candidates.sort(key=lambda x: x[0])
-    # Only keep candidates that match-or-beat current objective; otherwise
-    # this operator would actively worsen the solution.
+    # only accept improving candidates, otherwise this operator just hurts
     if candidates[0][0] >= old_obj:
         return current_solution
     if random.random() < _EXPLORE_PROB:
-        # Among improving candidates only.
         improving = [c for c in candidates if c[0] < old_obj]
         top_k = min(5, len(improving))
         return random.choice(improving[:top_k])[1]

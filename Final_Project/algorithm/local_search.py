@@ -1,18 +1,11 @@
-"""Exhaustive local-search routine for ALNS intensification.
-
-Three deterministic best-improvement sweeps applied in cycle until a full
-cycle finds no improvement:
-
-    1. truck_2opt_sweep         - reverse every truck segment, refit drones
-    2. truck_drone_reassign_sweep - exhaustive truck<->drone single-move
-    3. drone_window_sweep       - exhaustive launch/land retiming per trip
-
-Each sweep evaluates every candidate, applies the single best-improving move
-(if any), then re-runs from the new state. Returns when a sweep finds nothing.
-
-Designed to be invoked at every new global best and once at end-of-run.
-Caps: per-call iteration limit + optional wall-clock budget.
-"""
+# exhaustive local search used for intensification.
+# three deterministic best-improvement sweeps cycled until a full cycle
+# finds nothing:
+#   1. truck_2opt_sweep         - reverse every truck segment, refit drones
+#   2. truck_drone_reassign_sweep - move each customer truck<->drone
+#   3. drone_window_sweep       - retry every launch/land pair per trip
+# called once at end-of-run on n>30 instances. capped by max_cycles and a
+# wall-clock budget.
 
 from __future__ import annotations
 
@@ -37,17 +30,13 @@ def _clone(sol):
     return [sol[0][:], sol[1][:], sol[2][:]]
 
 
-# ---------------------------------------------------------------------------
-# Sweep 1: truck 2-opt with drone refit
-# ---------------------------------------------------------------------------
-
+# sweep 1: truck 2-opt with drone refit
 def _two_opt_apply(truck, i, j):
-    """Return new truck with truck[i..j] reversed (inclusive)."""
     return truck[:i] + truck[i : j + 1][::-1] + truck[j + 1 :]
 
 
+# rough distance change from reversing truck[i..j], no drone effect
 def _two_opt_estimate_delta(truck, i, j, T):
-    """Quick estimate of distance change from reversing truck[i..j]."""
     if i <= 0 or j >= len(truck) - 1:
         return 0.0
     a = truck[i - 1]
@@ -57,23 +46,22 @@ def _two_opt_estimate_delta(truck, i, j, T):
     return T[a][c] + T[b][d] - T[a][b] - T[c][d]
 
 
+# best-improvement 2-opt. drones get refit via endpoint remap, with
+# repair_drone_route as a fallback for minor breaks.
 def truck_2opt_sweep(sol, evaluate, ctx, current_cost, deadline=None):
-    """Best-improvement 2-opt on the truck route. Refits drones via endpoint
-    remapping; falls back to repair_drone_route on minor breaks. Returns
-    (new_sol, new_cost, improved_bool)."""
     T = ctx["T"]
     truck = sol[0]
     n = len(truck)
     if n < 5:
         return sol, current_cost, False
 
-    # Build candidate list (i, j) with 1 <= i < j <= n-2 (skip depot endpoints).
+    # all (i, j) with 1 <= i < j <= n-2, skipping depot endpoints
     candidates = []
     for i in range(1, n - 1):
         for j in range(i + 1, n - 1):
             candidates.append((i, j))
 
-    # Pruning: on routes > 20 nodes, evaluate only top-k by estimated delta.
+    # for big routes, only keep the most promising pairs by estimated delta
     if n > 20:
         candidates.sort(key=lambda ij: _two_opt_estimate_delta(truck, ij[0], ij[1], T))
         k = max(20, n * n // 2)
@@ -86,10 +74,9 @@ def truck_2opt_sweep(sol, evaluate, ctx, current_cost, deadline=None):
     for (i, j) in candidates:
         if deadline is not None and time.perf_counter() > deadline:
             break
-        # Quick estimate: skip if truck-only delta is non-improving by >5% of current_cost
-        # (drone refit can only worsen, never improve, the truck delta — but it can
-        # affect drone arrival times. So we use a conservative skip filter only for
-        # very-large positive estimated deltas.)
+        # skip pairs whose truck-only estimate is more than 2% worse than the
+        # current cost. drone refit can only hurt, not help, so big positive
+        # estimated deltas are basically never recoverable.
         est = _two_opt_estimate_delta(truck, i, j, T)
         if est > 0 and est > 0.02 * current_cost:
             continue
@@ -124,19 +111,15 @@ def truck_2opt_sweep(sol, evaluate, ctx, current_cost, deadline=None):
     return best_sol, current_cost + best_delta, True
 
 
-# ---------------------------------------------------------------------------
-# Sweep 2: exhaustive truck <-> drone reassignment
-# ---------------------------------------------------------------------------
+# sweep 2: exhaustive truck <-> drone reassignment
 
+# move truck[c_idx_in_truck] into a drone route at its best position
 def _try_truck_to_drone(sol, c_idx_in_truck, evaluate, ctx, current_cost):
-    """Move truck[c_idx_in_truck] into a drone route at its best position.
-    Returns (best_sol, best_cost) or (None, current_cost) if no improvement."""
     truck = sol[0]
     if c_idx_in_truck <= 0 or c_idx_in_truck >= len(truck) - 1:
         return None, current_cost
     node = truck[c_idx_in_truck]
 
-    # Tentative truck without this node.
     new_truck = truck[:c_idx_in_truck] + truck[c_idx_in_truck + 1 :]
 
     best_cost = current_cost
@@ -144,8 +127,7 @@ def _try_truck_to_drone(sol, c_idx_in_truck, evaluate, ctx, current_cost):
 
     for drone_idx in (1, 2):
         drone_route = sol[drone_idx]
-        # Remap drone route indices to the new truck (which is shorter by 1).
-        # Indices > c_idx_in_truck shift down by 1.
+        # the new truck is shorter by 1, so indices > c_idx_in_truck shift down by 1
         remapped = []
         ok = True
         for cust, li, di in drone_route:
@@ -160,7 +142,6 @@ def _try_truck_to_drone(sol, c_idx_in_truck, evaluate, ctx, current_cost):
         if not drone_route_is_feasible(remapped):
             continue
 
-        # Try every insertion position in the remapped drone route.
         for ins_idx in range(len(remapped) + 1):
             pair = build_drone_pair(
                 node, new_truck, remapped, ins_idx,
@@ -205,9 +186,8 @@ def _try_truck_to_drone(sol, c_idx_in_truck, evaluate, ctx, current_cost):
     return best_sol, best_cost
 
 
+# move drone[drone_idx][trip_idx] back onto the truck at its cheapest position
 def _try_drone_to_truck(sol, drone_idx, trip_idx, evaluate, ctx, current_cost):
-    """Move drone[drone_idx][trip_idx] customer onto truck at cheapest position.
-    Returns (best_sol, best_cost) or (None, current_cost)."""
     T = ctx["T"]
     truck = sol[0]
     drone_route = sol[drone_idx]
@@ -215,22 +195,20 @@ def _try_drone_to_truck(sol, drone_idx, trip_idx, evaluate, ctx, current_cost):
         return None, current_cost
     node = drone_route[trip_idx][0]
 
-    # Remove trip from drone route.
     new_drone = drone_route[:trip_idx] + drone_route[trip_idx + 1 :]
 
     best_cost = current_cost
     best_sol = None
 
-    # Try every insertion position in truck (after position 0, before last).
     for ins_idx in range(1, len(truck)):
         a = truck[ins_idx - 1]
         b = truck[ins_idx]
-        # Skip clearly-bad inserts (more than 5% of objective worse on truck delta).
+        # skip clearly bad inserts (more than 5% of current cost worse on the truck side)
         truck_delta = T[a][node] + T[node][b] - T[a][b]
         if truck_delta > 0.05 * current_cost:
             continue
         new_truck = truck[:ins_idx] + [node] + truck[ins_idx:]
-        # Shift drone-route indices >= ins_idx by +1.
+        # shift drone indices >= ins_idx by +1
         shifted_active = []
         for cust, li, di in new_drone:
             shifted_active.append((cust, li + 1 if li >= ins_idx else li,
@@ -261,14 +239,14 @@ def _try_drone_to_truck(sol, drone_idx, trip_idx, evaluate, ctx, current_cost):
     return best_sol, best_cost
 
 
+# exhaustive single-customer reassignment, every truck->drone and drone->truck.
+# applies the single best-improving move.
 def truck_drone_reassign_sweep(sol, evaluate, ctx, current_cost, deadline=None):
-    """Exhaustive single-customer reassignment: every truck->drone and
-    drone->truck move. Apply the single best-improving."""
     truck = sol[0]
     best_sol = None
     best_cost = current_cost
 
-    # Truck -> drone: every interior truck customer.
+    # truck -> drone, every interior truck customer
     for c_idx in range(1, len(truck) - 1):
         if deadline is not None and time.perf_counter() > deadline:
             break
@@ -277,7 +255,7 @@ def truck_drone_reassign_sweep(sol, evaluate, ctx, current_cost, deadline=None):
             best_cost = cand_cost
             best_sol = cand_sol
 
-    # Drone -> truck: every drone trip.
+    # drone -> truck, every drone trip
     for d_idx in (1, 2):
         for t_idx in range(len(sol[d_idx])):
             if deadline is not None and time.perf_counter() > deadline:
@@ -292,13 +270,9 @@ def truck_drone_reassign_sweep(sol, evaluate, ctx, current_cost, deadline=None):
     return best_sol, best_cost, True
 
 
-# ---------------------------------------------------------------------------
-# Sweep 3: exhaustive drone window retiming
-# ---------------------------------------------------------------------------
-
+# sweep 3: for each drone trip, try every (launch, land) pair valid given the
+# neighbouring trips and flight constraint, apply the best improving one.
 def drone_window_sweep(sol, evaluate, ctx, current_cost, deadline=None):
-    """For each drone trip, exhaustively try every (launch_idx, land_idx) pair
-    valid given neighboring trips and flight constraints. Apply best-improving."""
     T = ctx["T"]
     D = ctx["D"]
     flight_limit = ctx["flight_limit"]
@@ -316,16 +290,15 @@ def drone_window_sweep(sol, evaluate, ctx, current_cost, deadline=None):
             if deadline is not None and time.perf_counter() > deadline:
                 break
             cust, cur_li, cur_di = drone_route[trip_idx]
-            # Valid range: launch >= prev_land (or 0), land <= next_launch (or n-1).
+            # launch >= prev_land (or 0), land <= next_launch (or n-1)
             prev_land = 0 if trip_idx == 0 else drone_route[trip_idx - 1][2]
             next_launch = (n_truck - 1) if trip_idx == len(drone_route) - 1 else drone_route[trip_idx + 1][1]
 
             for li in range(prev_land, next_launch):
                 if li < 1 or li >= n_truck - 1:
-                    # launch can be at depot start? No: launch must be a truck stop, not endpoint.
-                    # depot-as-launch is allowed in some schemes but here we keep launch interior.
+                    # li == 0 is the depot, which is allowed as a launch
                     if li == 0:
-                        pass  # allow li=0 (depot launch)
+                        pass
                     else:
                         continue
                 for di in range(li + 1, next_launch + 1):
@@ -333,7 +306,6 @@ def drone_window_sweep(sol, evaluate, ctx, current_cost, deadline=None):
                         continue
                     if li == cur_li and di == cur_di:
                         continue
-                    # Flight feasibility.
                     launch_node = truck[li]
                     land_node = truck[di]
                     trip_dist = D[launch_node][cust] + D[cust][land_node]
@@ -357,10 +329,7 @@ def drone_window_sweep(sol, evaluate, ctx, current_cost, deadline=None):
     return best_sol, best_cost, True
 
 
-# ---------------------------------------------------------------------------
-# Outer cycle
-# ---------------------------------------------------------------------------
-
+# cycle sweeps 1 -> 2 -> 3 until a full cycle finds nothing, or budgets hit.
 def local_search(
     sol,
     current_cost,
@@ -369,8 +338,6 @@ def local_search(
     max_cycles=20,
     time_budget_seconds=None,
 ):
-    """Run sweeps 1->2->3 in cycle until a full cycle finds no improvement,
-    or until cycle/time caps hit. Returns (new_sol, new_cost, n_cycles_used)."""
     deadline = (time.perf_counter() + time_budget_seconds) if time_budget_seconds else None
     cur_sol = _clone(sol)
     cur_cost = current_cost

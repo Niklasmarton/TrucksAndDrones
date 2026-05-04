@@ -1,22 +1,3 @@
-"""
-This operator is a destroy-and-repair operator.
-
-It removes a small set of truck customers and then reinserts them one by one, either back into the truck route or into a drone route. 
-
-The idea was to make a larger neighborhood move than simple reinsertion, and to move around nodes with bad edges to better spots to hopefully decrease delivery time. The search can restructure parts of the solution and escape local patterns while still keeping feasibility. The intention of the operator is thus escaping bad neighboroods. 
-
-For removal, the operator identifies truck nodes with high removal gain (nodes that contribute a lot to travel cost in their current position), excludes nodes currently used as drone launch/landing endpoints, and samples from a top candidate pool with randomness. This keeps the move targeted but not deterministic.
-
-After removal, the drone routes are index-shifted to stay consistent with the changed truck route. If shifting creates endpoint conflicts, the move is discarded.
-
-If finds the best truck insertion based on greedy truck delta. As for drone insertions, it finds feasible drone routes for the drone by creating launch and landing pairs. The drone pairs get scores based on a low waiting time for the truck, if the drone is slower than the truck on that route and if the drones have about the same workload. It tries to avoid drone trips that is bad for truck-drone synchronization or tries to overload one drone. From that point, the insertion is done greedily. 
-
-It also has an explore probability that allows it to sometimes choose random insertions among top candidates. 
-
-The destroy size is set pretty low (only 3 for the biggest datasets). That is because I wanted it to be strong enough to change up the solution but increase feasibility. 
-
-The operator is also phase-aware, meaning it is prioritized more later in the run. 
-"""
 import random
 from pathlib import Path
 import sys
@@ -32,13 +13,9 @@ _EXPLORE_PROB = 0.15
 _SEARCH_PROGRESS = 0.5
 
 
-def _clamp01(value):
-    return max(0.0, min(1.0, float(value)))
-
-
 def set_search_progress(progress):
     global _SEARCH_PROGRESS
-    _SEARCH_PROGRESS = _clamp01(progress)
+    _SEARCH_PROGRESS = max(0.0, min(1.0, float(progress)))
 
 
 def _clone_solution(solution):
@@ -90,11 +67,9 @@ def _shift_route_after_truck_removal(route, removed_idx):
 
 
 def _destroy_size(truck_len):
-    # Tiers are based on current truck customer count (not total n_customers),
-    # so the destroy size adapts as customers migrate to drone routes.
-    # Tested values: destroy 5 caused deep disruption (best-at-last-iter on
-    # R_100/Contest, 24959 vs 21710 avg) — the early-run disruption cost
-    # outweighs the larger neighbourhood. Max 3 is the right balance.
+    # tiers based on truck customer count, not total n.
+    # this way destroy size adapts as customers move to drones.
+    # tried 5 once, way too disruptive on big instances, 3 is the sweet spot.
     n_customers = max(0, truck_len - 2)
     if n_customers <= 10:
         return 1
@@ -143,8 +118,8 @@ def _pick_destroy_indices(truck, drone1, drone2, truck_times, depot, count):
     return sorted(chosen)
 
 
+# top_k cheapest truck insertion positions for node, best first
 def _top_truck_inserts(node, truck, truck_times, top_k=3):
-    """Return up to top_k (delta, ins_idx) truck insertion options sorted best-first."""
     scored = []
     for ins_idx in range(1, len(truck)):
         a = truck[ins_idx - 1]
@@ -238,7 +213,7 @@ def _drone_phase_penalty():
 def _node_insertion_options(node, truck, drone1, drone2, truck_times, drone_times):
     options = []
 
-    # Add top-3 truck positions so the repair isn't forced into a single greedy choice.
+    # keep top-3 truck spots so we're not stuck with a single greedy choice
     for delta, ins_idx in _top_truck_inserts(node, truck, truck_times, top_k=3):
         options.append((delta, "truck", ins_idx))
 
@@ -254,10 +229,9 @@ def _node_insertion_options(node, truck, drone1, drone2, truck_times, drone_time
     return options
 
 
+# vehicle-level regret-2: |best_truck - best_drone|.
+# bigger gap = more decisive node, place it first.
 def _vehicle_regret(node, truck, drone1, drone2, truck_times, drone_times):
-    """Compute vehicle-level regret-2: |best_truck - best_drone|.
-    Returns (regret, best_truck_opts, best_drone_opts, prefer_truck).
-    """
     truck_opts = _top_truck_inserts(node, truck, truck_times, top_k=3)
     truck_cost = truck_opts[0][0] if truck_opts else None
 
@@ -278,17 +252,12 @@ def _vehicle_regret(node, truck, drone1, drone2, truck_times, drone_times):
     return regret, truck_opts, drone_cands, prefer_truck
 
 
+# destroy: drop a few high-cost truck customers (skipping drone endpoints).
+# repair: reinsert each one into truck or drone via vehicle-regret ordering.
 def operator(current_solution):
-    """
-    op6: LNS destroy/repair
-    - Destroy: remove several high-cost truck customers (excluding drone endpoints).
-    - Repair: reinsert each removed node using best truck insertion or feasible drone insertion.
-    """
     assert_context_is_set()
     truck_times, drone_times, _, depot = get_operator_context()
 
-                                                                       
-                                                
     candidate = _clone_solution(current_solution)
     truck, drone1, drone2 = candidate
     if len(truck) <= 4:
@@ -310,9 +279,9 @@ def operator(current_solution):
 
     pending_nodes = removed_nodes[:]
     while pending_nodes:
-        # Vehicle Regret-2: rank pending nodes by |best_truck_cost - best_drone_cost|.
-        # The "most decisive" node (largest regret) is placed first into its
-        # cheaper vehicle, so we don't waste good slots on indifferent nodes.
+        # rank by regret = |best_truck_cost - best_drone_cost|.
+        # place the node with the largest gap first into its cheaper vehicle
+        # so we don't waste good slots on nodes that don't care much.
         best_node = None
         best_regret = -1.0
         best_truck_opts = None
@@ -334,8 +303,8 @@ def operator(current_solution):
         if best_node is None:
             return current_solution
 
-        # Insert into the preferred vehicle, with rank-biased pick within it
-        # to preserve some stochastic exploration of position choice.
+        # insert into the preferred vehicle, rank-biased pick to keep
+        # a bit of randomness in which exact position
         if best_prefer_truck and best_truck_opts:
             chosen = _rank_biased_pick(best_truck_opts, top_k=min(3, len(best_truck_opts)))
             _, ins_idx = chosen
@@ -348,7 +317,7 @@ def operator(current_solution):
             else:
                 drone2 = new_target
         else:
-            # Preferred vehicle had no options; fall back to the other.
+            # nothing in the preferred vehicle, fall back to the other one
             if best_truck_opts:
                 chosen = _rank_biased_pick(best_truck_opts, top_k=min(3, len(best_truck_opts)))
                 _, ins_idx = chosen

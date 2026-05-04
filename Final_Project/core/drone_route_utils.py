@@ -29,10 +29,8 @@ def build_drone_pair(
     max_neighbors=5,
     pair_explore_prob=0.30,
 ):
-    """
-    Returns (launch_idx, land_idx) for node at given insertion position in a drone route.
-    Enforces increasing index order and timeline feasibility at insertion point.
-    """
+    # returns (launch_idx, land_idx) for node at the given insertion position.
+    # keeps strictly increasing index order and timeline feasibility.
     T, D, flight_limit, _ = get_operator_context()
     internal_idx = internal_truck_indices(truck_route)
     if len(internal_idx) < 2:
@@ -50,15 +48,15 @@ def build_drone_pair(
     ranked_idx = sorted(internal_idx, key=lambda idx: T[node][truck_route[idx]])
     neighbor_cap = max(2, min(max_neighbors, len(ranked_idx)))
     nearest_idx = list(ranked_idx[:neighbor_cap])
-    # Always include depot endpoints. Their truck-distance ranking is bad
-    # for far-from-depot customers, but a depot launch/land has no hover
-    # or truck-wait penalty in the objective, so they're often the best
-    # pair when reachable within flight range.
+    # always include depot endpoints. they look bad on truck-distance ranking
+    # for far-from-depot customers, but a depot launch/land has no hover or
+    # truck-wait penalty so they often turn out to be the best pair when
+    # the flight range allows.
     for endpoint in (0, len(truck_route) - 1):
         if endpoint not in nearest_idx:
             nearest_idx.append(endpoint)
 
-    # Prefix truck times for O(1) truck segment duration lookups.
+    # prefix truck times so segment durations are O(1)
     truck_prefix = [0.0]
     for i in range(len(truck_route) - 1):
         truck_prefix.append(truck_prefix[-1] + T[truck_route[i]][truck_route[i + 1]])
@@ -126,38 +124,9 @@ def build_drone_pair(
     return pick_from_pairs(feasible_pairs(sampled_idx))
 
 
-def map_index_after_pop_insert(idx, pop_idx, insert_idx):
-    if idx > pop_idx:
-        idx -= 1
-    if idx >= insert_idx:
-        idx += 1
-    return idx
-
-
-def update_drone_route_indices(drone_route, pop_idx, insert_idx, removed_old_idx):
-    """
-    Remap trip indices so each trip still points to the same endpoint nodes
-    after truck pop+insert.
-    """
-    updated = []
-    for cust, launch_idx, land_idx in drone_route:
-        new_launch = insert_idx if launch_idx == removed_old_idx else map_index_after_pop_insert(
-            launch_idx, pop_idx, insert_idx
-        )
-        new_land = insert_idx if land_idx == removed_old_idx else map_index_after_pop_insert(
-            land_idx, pop_idx, insert_idx
-        )
-        updated.append((cust, new_launch, new_land))
-
-    updated.sort(key=lambda x: (x[1], x[2], x[0]))
-    return updated
-
-
+# keep each drone trip tied to the same endpoint nodes after a truck reorder
+# (e.g. 2-opt) instead of remapping by position.
 def remap_drone_route_by_endpoint_nodes(old_truck, new_truck, drone_route):
-    """
-    Keep each drone trip tied to the same endpoint nodes after a truck route move
-    that reorders many positions (e.g., 2-opt).
-    """
     new_index_of = {}
     for idx, node in enumerate(new_truck):
         if node not in new_index_of:
@@ -180,12 +149,10 @@ def remap_drone_route_by_endpoint_nodes(old_truck, new_truck, drone_route):
     return updated
 
 
+# timeline-level feasibility for one drone route:
+#  - launch < land
+#  - no overlap between trips on the same drone
 def drone_route_is_feasible(drone_route):
-    """
-    Feasibility at drone-route timeline level:
-    - launch < land
-    - no overlap inside a single drone route
-    """
     trips = sorted(drone_route, key=lambda x: (x[1], x[2], x[0]))
     prev_land = None
     for _, launch_idx, land_idx in trips:
@@ -197,10 +164,8 @@ def drone_route_is_feasible(drone_route):
     return True
 
 
+# only repairs trips that break launch/land order or overlap with neighbours
 def repair_drone_route(truck_route, drone_route, max_repairs=5, max_neighbors=6):
-    """
-    Repairs only trips that violate launch/land order or overlap.
-    """
     route = sorted(drone_route, key=lambda x: (x[1], x[2], x[0]))
     repairs = 0
     i = 0
@@ -280,8 +245,8 @@ def _endpoints_available(route, launch_idx, land_idx):
     return True
 
 
+# returns the customer of the first conflicting trip, or None
 def _find_drone_route_conflict(route):
-    """Return the customer node of the first conflicting trip, or None."""
     used_launch = set()
     used_land = set()
     prev_land = 0
@@ -299,10 +264,11 @@ def _find_drone_route_conflict(route):
     return None
 
 
-# ---------------------------------------------------------------------------
-# Public helpers used by operators
-# ---------------------------------------------------------------------------
+# public helpers used by operators
 
+# try primary_drone, then secondary_drone, then the truck as last resort.
+# returns (truck, primary_drone, secondary_drone, inserted_as_drone), or None
+# on hard failure (malformed truck).
 def insert_node_with_truck_fallback(
     node,
     truck,
@@ -312,14 +278,6 @@ def insert_node_with_truck_fallback(
     max_neighbors=5,
     pair_explore_prob=0.0,
 ):
-    """
-    Insert *node* preferentially into primary_drone, then secondary_drone,
-    then the truck as a last resort.
-
-    Returns (truck, primary_drone, secondary_drone, inserted_as_drone)
-    where inserted_as_drone is True when the node went into a drone route.
-    Returns None on hard failure (e.g. truck is malformed).
-    """
     T, _, _, _ = get_operator_context()
 
     for drone_route in (primary_drone, secondary_drone):
@@ -343,7 +301,7 @@ def insert_node_with_truck_fallback(
             else:
                 return truck[:], primary_drone[:], new_route, True
 
-    # Fall back: insert into truck
+    # fallback: put it on the truck
     if node in truck:
         return truck[:], primary_drone[:], secondary_drone[:], False
 
@@ -357,14 +315,10 @@ def insert_node_with_truck_fallback(
     return new_truck, new_primary, new_secondary, False
 
 
+# repair overlapping, out-of-order, or duplicate-endpoint trips in drone1/drone2
+# by moving the conflicting customers to the truck.
+# returns (truck, drone1, drone2, ok). ok=False if not resolved in max_iterations.
 def enforce_wait_feasible_with_truck_fallback(truck, drone1, drone2, max_iterations=100):
-    """
-    Repair any overlapping, out-of-order, or duplicate-endpoint trips in
-    drone1 / drone2 by moving conflicting customers to the truck.
-
-    Returns (truck, drone1, drone2, ok).  ok=False if unresolvable within
-    max_iterations.
-    """
     T, _, _, _ = get_operator_context()
     truck = truck[:]
     drone1 = drone1[:]

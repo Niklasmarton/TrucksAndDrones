@@ -1,21 +1,3 @@
-"""
-Aggressive ruin-and-recreate. Mirrors fast_tsp_operator approach:
-  1. Remove K random truck customers + K random drone customers.
-  2. Strip ALL remaining drone customers (full drone partition reset).
-  3. Merge removed-from-drone into truck pool, TSP-rebuild the truck route.
-  4. Reassign every "loose" customer (removed-from-truck + stripped drones)
-     to the drones via either:
-       - small-n branch: optimal recursive (launch, land, drone) assignment
-         scored by total arrival time. Also tries all truck permutations
-         when truck-set is small enough.
-       - large-n branch: greedy earliest-arrival insertion.
-
-Unlike op6 (which preserves drone structure), this operator wipes the drone
-partition each call. This is what lets ALNS migrate between truck-set basins.
-The optimal-assign branch is required to reach 585 on R_10: greedy insertion
-cannot construct the depot-launching/depot-landing drone tuples that the
-optimal solution uses.
-"""
 from pathlib import Path
 import random
 import sys
@@ -35,9 +17,8 @@ from drone_route_utils import build_drone_pair, drone_route_is_feasible
 import op6_TSP_drone_rebuild as op6
 
 
+# full objective, mirrors CalCulateTotalArrivalTime. inf when flight range is broken.
 def _total_arrival_time(solution, truck_times, drone_times, depot, flight_range):
-    """Full makespan simulation matching CalCulateTotalArrivalTime exactly.
-    Returns float('inf') if the solution is flight-range infeasible."""
     truck, drone1, drone2 = solution
     n = len(truck)
     if n < 2:
@@ -111,10 +92,9 @@ def _route_endpoint_unique(route):
     return True
 
 
+# try the best drone slot first, fall back to the cheapest truck position
 def _greedy_assign_one(customer, truck, drone1, drone2,
                        truck_times, drone_times, flight_range, depot):
-    """Try to insert `customer` into best drone slot; if none feasible, into
-    best truck position. Returns (truck, drone1, drone2)."""
     prefix = [0.0]
     for i in range(len(truck) - 1):
         prefix.append(prefix[-1] + truck_times[truck[i]][truck[i + 1]])
@@ -170,10 +150,8 @@ def _greedy_assign_one(customer, truck, drone1, drone2,
     return new_truck, shifted_d1, shifted_d2
 
 
+# every (drone_id, launch, land) within flight range. hover-wait is checked later by the full eval
 def _enumerate_drone_options(customer, truck, drone_times, flight_range):
-    """All feasible (drone_id, launch_idx, land_idx) tuples for `customer`
-    given the truck route, ignoring flight-range hover-wait (full-objective
-    eval will catch any infeasibility)."""
     n = len(truck)
     opts = []
     for launch in range(n - 1):
@@ -188,14 +166,11 @@ def _enumerate_drone_options(customer, truck, drone_times, flight_range):
     return opts
 
 
+# recursively assign loose customers to drone slots given a fixed truck route.
+# leaf_budget caps the number of full evaluations so wall-time stays bounded.
 def _optimal_assign(truck_route, loose_custs,
                     truck_times, drone_times, flight_range, depot,
                     leaf_budget=_OPT_MAX_LEAVES):
-    """Recursive optimal assignment of `loose_custs` to drone slots given
-    `truck_route`. Returns (best_score, best_d1, best_d2) or (inf, [], []).
-
-    `leaf_budget` caps the number of leaf evaluations to keep wall-time bounded.
-    """
     if not loose_custs:
         sol = [truck_route[:], [], []]
         s = _total_arrival_time(sol, truck_times, drone_times, depot, flight_range)
@@ -255,12 +230,10 @@ def _optimal_assign(truck_route, loose_custs,
     return best[0], d1_sorted, d2_sorted
 
 
+# small-n branch: TSP route + a few shuffles, optimal drone assign for each, pick the best.
+# capped at _OPT_TRUCK_CANDIDATES routes so wall-time stays bounded.
 def _small_n_rebuild(truck_pool, loose_custs,
                      truck_times, drone_times, flight_range, depot):
-    """Try a small set of truck route candidates (TSP-optimal + a few random
-    shuffles), do optimal drone assignment for each, return best.
-
-    Bounded to _OPT_TRUCK_CANDIDATES routes for wall-time control."""
     if not truck_pool:
         return None
 

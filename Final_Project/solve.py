@@ -1,24 +1,22 @@
-"""Command-line entry point for the Truck-and-Drone ALNS solver.
-
-Usage:
-
-    # Solve every *.txt file in ./instances/ in parallel (default if no argument)
-    python solve.py
-
-    # Solve a single instance
-    python solve.py F_100.txt
-    python solve.py path/to/your_instance.txt
-
-    # Adjust the per-instance time budget, fix a seed, or set worker count
-    python solve.py --time-limit 300
-    python solve.py F_100.txt --seed 42
-    python solve.py --workers 4
-
-A solved instance produces three numbers (best objective, runtime,
-customers) and the pipe-encoded solution. When solving the whole folder,
-each result is also written to ./outputs/<instance>.result.txt and a
-summary table is printed at the end.
-"""
+# CLI for the truck and drone ALNS solver.
+#
+# usage:
+#   # solve every *.txt in ./instances/ in parallel (default with no arg)
+#   python solve.py
+#
+#   # solve a single instance
+#   python solve.py F_100.txt
+#   python solve.py path/to/your_instance.txt
+#
+#   # tweak the per-instance time budget, fix a seed, or set worker count
+#   python solve.py --time-limit 300
+#   python solve.py F_100.txt --seed 42
+#   python solve.py --workers 4
+#
+# each solved instance prints best objective, runtime, customers and the
+# pipe-encoded solution. when solving the whole folder, each result is also
+# written to ./outputs/<instance>.result.txt and a summary table is printed
+# at the end.
 
 import argparse
 import multiprocessing as mp
@@ -80,8 +78,8 @@ def _save_result(instance_path, result):
     return out_path
 
 
+# direct (non-pool) single-instance solve, used by single-arg CLI mode
 def _solve_single(instance_path, time_limit, seed):
-    """Direct (non-pool) single-instance solve. Used by single-arg CLI mode."""
     from truck_and_drone import solve
     print(f"\n>>> Solving {instance_path.name}  "
           f"(time_limit={time_limit:.0f}s"
@@ -92,12 +90,10 @@ def _solve_single(instance_path, time_limit, seed):
                  seed=seed)
 
 
+# pool worker, solves one instance in its own process. re-imports the solver
+# because spawn-mode workers don't inherit parent-process module state.
+# returns a dict the parent can format.
 def _worker(args):
-    """Pool worker: solves one instance in its own process.
-
-    Re-imports the solver because spawn-mode workers don't inherit
-    parent-process module state. Returns a dict the parent can format.
-    """
     instance_path, time_limit, seed = args
     if str(ALG_DIR) not in sys.path:
         sys.path.insert(0, str(ALG_DIR))

@@ -1,12 +1,8 @@
-"""ALNS solver for the Truck-and-Drone routing problem.
-
-Entry point: solve(instance_path, time_limit_seconds) -> dict with
-  best_objective, pipe, runtime, solution.
-
-All paths inside the project are relative to this file. No analysis,
-plotting, logging or multi-run statistics are produced; this module is
-the lean production runtime.
-"""
+# ALNS solver for the truck and drone routing problem.
+# entry point: solve(instance_path, time_limit_seconds) -> dict with
+# best_objective, pipe, runtime, solution.
+# all paths inside the project are relative to this file. no analysis,
+# plotting or logging here, this is the lean runtime version.
 
 from collections import OrderedDict
 from pathlib import Path
@@ -43,10 +39,7 @@ import escape
 import local_search as ls
 
 
-# ---------------------------------------------------------------------------
-# Solution helpers
-# ---------------------------------------------------------------------------
-
+# solution helpers
 def clone_solution(solution):
     return [solution[0][:], solution[1][:], solution[2][:]]
 
@@ -184,26 +177,17 @@ def format_solution_pipe(solution):
     )
 
 
-# ---------------------------------------------------------------------------
-# Initial solution: NN walk with cyclic vehicle assignment
-# ---------------------------------------------------------------------------
-
+# initial solution: NN walk with cyclic vehicle assignment.
+#  1. NN walk assigns each customer to truck/drone1/drone2 in a shuffled cycle
+#  2. all customers start on the truck in NN visit order
+#  3. the ones marked for a drone get pulled off the truck one at a time,
+#     using the best static-hover-feasible (launch, land) pair. if no valid
+#     pair exists the customer stays on the truck.
+#  4. availability pass drops drone trips that break the multi-trip timeline,
+#     dropped customers fall back to the truck.
+#  5. dynamic-calculator safety pass catches any trip that still slips through
+#     because of cross-drone cascade effects.
 def build_initial_solution(instance_data):
-    """
-    Construction heuristic:
-    1. Greedy NN walk assigns each customer to truck (0), drone1 (1), or
-       drone2 (2) in a randomly-shuffled cyclic order.
-    2. ALL customers start on the truck in NN visit order.
-    3. Customers designated for a drone are moved off the truck one by
-       one — the best static-hover-feasible (launch, land) pair in the
-       current (shrinking) truck is selected, avoiding already-used
-       endpoints. If no valid pair exists the customer stays on the
-       truck.
-    4. Availability pass removes drone trips that violate the multi-trip
-       timeline; failed customers fall back to the truck.
-    5. Final safety pass uses the dynamic calculator to remove any trip
-       that still slips through (cross-drone cascading effects).
-    """
     n_customers = instance_data["n_customers"]
     depot = instance_data.get("depot_index", 0)
     T = instance_data["truck_times"]
@@ -361,10 +345,7 @@ def build_initial_solution(instance_data):
     return [truck, drone1, drone2]
 
 
-# ---------------------------------------------------------------------------
-# Operator dispatch & weight normalisation
-# ---------------------------------------------------------------------------
-
+# operator dispatch and weight normalisation
 def _normalize_weight_dict(weights, min_weight=0.03):
     fixed = {k: max(min_weight, float(v)) for k, v in weights.items()}
     s = sum(fixed.values())
@@ -435,10 +416,7 @@ def apply_main_operator(solution, op_name):
     raise ValueError(f"Unknown operator {op_name}")
 
 
-# ---------------------------------------------------------------------------
-# Escape (double-bridge primary, large related-destroy fallback, aggressive D&R last resort)
-# ---------------------------------------------------------------------------
-
+# escape: double-bridge primary, large related-destroy fallback, aggressive D&R last resort
 def _truck_removal_gain(truck, idx, truck_times):
     if idx <= 0 or idx >= len(truck) - 1:
         return 0.0
@@ -579,10 +557,7 @@ def _escape_with_related_large(incumbent, incumbent_cost, best_solution,
     return current, current_cost, improved_best, feasible_steps
 
 
-# ---------------------------------------------------------------------------
 # ALNS main loop
-# ---------------------------------------------------------------------------
-
 def alns_improved(initial_solution, instance_data, ctx, calc, checker,
                   *, time_limit_seconds, warmup_iterations=500,
                   iterations=10_000_000, cache_limit=200_000,
@@ -590,21 +565,17 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
                   escape_stall_limit=None,
                   rrt_deviation_factor=0.13, rrt_decay_exponent=1.0,
                   reward_improve_threshold=50.0,
-                  uphill_reward_cap=30.0,
                   sigma_global_best=8.0, sigma_incumbent_improve=4.0,
                   sigma_small_improve=1.0, sigma_uphill_accepted=0.6,
-                  warmup_delta_trim_quantile=0.9,
                   enable_local_search=True,
                   ls_max_cycles=None,
                   ls_end_time_budget_seconds=None):
-    """Single ALNS run with end-of-run local search.
-
-    Returns (best_solution, best_cost).
-    Size-tiered operator set + RRT acceptance + double-bridge escape.
-    """
+    # one ALNS run with end-of-run local search.
+    # returns (best_solution, best_cost).
+    # size-tiered operator set + RRT acceptance + double-bridge escape.
     n_cust = ctx.get("n_customers", 100)
 
-    # Size-tiered operator set + RRT decay
+    # operator set + RRT decay are picked based on instance size
     if n_cust <= 15:
         op_names = ["op1", "op2", "op3", "op4", "op5", "op6",
                     "op7", "op8", "op10"]
@@ -618,13 +589,13 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
         rrt_deviation_factor = 0.05
         rrt_decay_exponent = 1.5
 
-    # End-LS budget defaults
+    # end-of-run LS budget defaults
     if ls_max_cycles is None:
         ls_max_cycles = 30 if n_cust > 30 else 20
     if ls_end_time_budget_seconds is None:
         ls_end_time_budget_seconds = 40.0 if n_cust > 30 else 10.0
 
-    # Stall / segment defaults
+    # stall and segment defaults
     if segment_length is None:
         segment_length = max(15, n_cust)
     if escape_stall_limit is None:
@@ -656,7 +627,6 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
     best_cost = incumbent_cost
 
     total_steps = max(1, warmup_iterations + iterations)
-    deltas = []
 
     def _rrt_deviation(best_obj, g, G):
         G = max(1, int(G))
@@ -664,7 +634,7 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
         frac = ((G - g) / G) ** float(rrt_decay_exponent)
         return float(rrt_deviation_factor) * frac * max(1.0, float(best_obj))
 
-    # Warmup: random operator pick, no weights yet, collect deltas
+    # Warmup: random operator pick, no weights yet
     for w in range(warmup_iterations):
         configure_operator_search_progress(w / total_steps)
         op_name = random.choice(op_names)
@@ -680,8 +650,6 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
             continue
         stats[op_name]["feasible"] += 1
         delta_e = cand_cost - incumbent_cost
-        if delta_e >= 0:
-            deltas.append(delta_e)
         if delta_e < 0:
             incumbent = candidate
             incumbent_cost = cand_cost
@@ -844,28 +812,10 @@ def alns_improved(initial_solution, instance_data, ctx, calc, checker,
     return best_solution, best_cost
 
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
-
+# solve one instance file. time_limit_seconds is the ALNS budget; end-of-run
+# LS adds up to ~40s on top for n>30 instances. returns a dict with keys
+# best_objective, pipe, runtime, solution, n_customers.
 def solve(instance_path, time_limit_seconds=600.0, seed=None):
-    """Solve a single instance file.
-
-    Parameters
-    ----------
-    instance_path : str | Path
-        Path to a problem instance text file.
-    time_limit_seconds : float
-        Wall-clock budget for the ALNS phase. End-LS adds up to ~40s on
-        top of this for n>30 instances.
-    seed : int | None
-        Optional RNG seed for reproducibility.
-
-    Returns
-    -------
-    dict with keys: best_objective (float), pipe (str), runtime (float),
-                    solution (list), n_customers (int).
-    """
     if seed is not None:
         random.seed(seed)
 

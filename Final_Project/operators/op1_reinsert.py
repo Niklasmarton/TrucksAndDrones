@@ -1,19 +1,3 @@
-"""
-This operator is a reinsertion operator
-
-It is based on the one used in the previous assignment - it takes a node from either truck or drone and reinserts it back into either truck or drone
-The idea was having an operator that makes smaller, but hopefully, good moves, simply moving a node between truck and drones
-
-For the truck, the thought was to fin the most costly nodes and choose randomly between top k nodes but with a rank bias (meaning that be worse nodes will be chosen with a higher likelihood)
-As for the drone, I found that choosing random routes for removal produced better solutions
-For insertion from drone to truck, I calculate the truck delta (decreased delivery time by insertion) and insert greedy
-For drone insertion, the operator first builds a set of candidate insertion positions in the target drone route, then evaluates feasible launch/landing pairs for each candidate position. The feasible options are then scored based on the travel time of the truck compared to the travel time of the drone. Then, the insertion chooses the best option greedily. 
-
-The operator is also biased towards building the truck route early in the run to build a good basis. From the middle of the run it chooses truck<-> drone about 50/50 and later on it focuses on refining drone routes. 
-
-I also have explore prob, which gives the operator a diversifying effect where it does not choose the insertion greedily, but randomly. Through testing, this haad good effects on the solutions. 
-"""
-
 import random
 from pathlib import Path
 import sys
@@ -26,40 +10,20 @@ from drone_route_utils import build_drone_pair, drone_route_is_feasible
 from operator_context import assert_context_is_set, get_operator_context, set_operator_context
 
 
-# Exploration settings
 _EXPLORE_PROB = 0.12
 _PAIR_EXPLORE_PROB = 0.10
-_TRUCK_TO_DRONE_BIAS = 0.0
 _SYNC_PEN_WEIGHT = 0.15
 _SEARCH_PROGRESS = 0.5
 
-# Tuning knobs
 _MAX_ATTEMPTS = 5
 _TOP_K_TRUCK_REMOVALS = 4
 _TOP_K_TRUCK_INSERTIONS = 5
 _MAX_DRONE_INSERTION_TRIALS = 6
 
 
-def reset_operator_state():
-    pass
-
-
-def _clamp01(value):
-    return max(0.0, min(1.0, float(value)))
-
-
-def set_truck_to_drone_bias(bias):
-    """
-    Configure how strongly op1 should favor truck->drone reinsert moves.
-    0.0 keeps baseline behavior, 1.0 applies the strongest bias.
-    """
-    global _TRUCK_TO_DRONE_BIAS
-    _TRUCK_TO_DRONE_BIAS = _clamp01(bias)
-
-
 def set_search_progress(progress):
     global _SEARCH_PROGRESS
-    _SEARCH_PROGRESS = _clamp01(progress)
+    _SEARCH_PROGRESS = max(0.0, min(1.0, float(progress)))
 
 
 def _clone_solution(solution):
@@ -67,10 +31,8 @@ def _clone_solution(solution):
 
 
 
+# gain from cutting truck[idx] out of the route
 def _truck_removal_gain(truck, idx, truck_times):
-    """
-    Gain from removing truck[idx] from the truck route.
-    """
     if idx <= 0 or idx >= len(truck) - 1:
         return 0.0
 
@@ -85,11 +47,8 @@ def _truck_removal_gain(truck, idx, truck_times):
     )
 
 
+# cost delta for inserting node at truck[insertion_index]
 def _truck_insertion_delta(truck, insertion_index, node, truck_times):
-    """
-    Delta from inserting node at truck[insertion_index].
-    insertion_index is the position where node would be inserted.
-    """
     if insertion_index <= 0 or insertion_index >= len(truck):
         return float("inf")
 
@@ -104,17 +63,13 @@ def _truck_insertion_delta(truck, insertion_index, node, truck_times):
 
 
 def _sample_top_indices(scored_items, k):
-    """
-    Returns up to k best indices from a list of (score, value), sorted descending.
-    """
     scored_items.sort(key=lambda x: x[0], reverse=True)
     return [value for _, value in scored_items[:k]]
 
 
+# pick truck nodes that save the most time when removed,
+# but mix in the rest for diversity
 def _candidate_truck_removal_indices(truck):
-    """
-    Prefer truck nodes whose removal saves a lot of truck time.
-    """
     truck_times, _, _, _ = get_operator_context()
     indices = list(range(1, len(truck) - 1))
     if not indices:
@@ -123,7 +78,6 @@ def _candidate_truck_removal_indices(truck):
     scored = [(_truck_removal_gain(truck, idx, truck_times), idx) for idx in indices]
     best = _sample_top_indices(scored, _TOP_K_TRUCK_REMOVALS)
 
-    # Keep some diversity by mixing with all indices
     remaining = [idx for idx in indices if idx not in best]
     random.shuffle(remaining)
     return best + remaining
@@ -137,8 +91,8 @@ def _choose_truck_removal_index(truck):
     if random.random() < _EXPLORE_PROB:
         return random.choice(candidates[: min(len(candidates), 8)])
 
-    # Rank-weighted random over top-k: rank 1 gets weight 1, rank 2 gets 1/2, etc.
-    # Strongly biases toward the best node while still visiting lower-ranked nodes.
+    # rank-weighted pick: rank 1 -> 1, rank 2 -> 1/2, etc.
+    # leans heavily on the best node but still visits worse ones now and then
     k = min(_TOP_K_TRUCK_REMOVALS, len(candidates))
     weights = [1.0 / (i + 1) for i in range(k)]
     total = sum(weights)
@@ -156,13 +110,8 @@ def _choose_drone_removal_index(route):
     return random.randint(0, len(route) - 1)
 
 
+# pick which list (truck / drone1 / drone2) to remove a node from
 def _select_valid_source(solution):
-    """
-    Soft source choice:
-    - slight preference for truck when truck->drone bias is high
-    - otherwise keep all sources possible
-    - no fixed target drone count
-    """
     truck, drone1, drone2 = solution
 
     valid_sources = []
@@ -179,15 +128,13 @@ def _select_valid_source(solution):
     if len(valid_sources) == 1:
         return valid_sources[0]
 
-    truck_pick_prob = 0.34 + 0.36 * _TRUCK_TO_DRONE_BIAS
-
-    if 0 in valid_sources and random.random() < truck_pick_prob:
+    if 0 in valid_sources and random.random() < 0.34:
         return 0
 
     if random.random() < _EXPLORE_PROB:
         return random.choice(valid_sources)
 
-    # Mild preference to take from the longer drone route, otherwise truck.
+    # prefer the longer drone route, fall back to truck
     if 1 in valid_sources or 2 in valid_sources:
         d1_len = len(drone1) if 1 in valid_sources else -1
         d2_len = len(drone2) if 2 in valid_sources else -1
@@ -200,12 +147,10 @@ def _select_valid_source(solution):
     return 0
 
 
+# pick which list to insert into, given where we removed from.
+# truck source -> mostly truck early, more drone later
+# drone source -> mostly truck, sometimes the other drone
 def _select_insert_target(removal_choice, solution):
-    """
-    Soft target choice:
-    - when removing from truck, use a bias toward drones
-    - otherwise prefer truck more often, but still allow drone-to-drone moves
-    """
     truck, drone1, drone2 = solution
 
     if random.random() < _EXPLORE_PROB:
@@ -215,20 +160,20 @@ def _select_insert_target(removal_choice, solution):
         return random.choice(choices)
 
     if removal_choice == 0:
-        # Phase-aware ramp: very truck-heavy early, then gradually increase drone usage.
+        # ramp: truck-heavy at start, more drone usage as run progresses
         if _SEARCH_PROGRESS < 0.15:
             truck_to_drone_prob = 0.03
         elif _SEARCH_PROGRESS < 0.35:
             truck_to_drone_prob = 0.12
         elif _SEARCH_PROGRESS < 0.60:
-            truck_to_drone_prob = 0.28 + 0.25 * _TRUCK_TO_DRONE_BIAS
+            truck_to_drone_prob = 0.28
         else:
-            truck_to_drone_prob = 0.38 + 0.36 * _TRUCK_TO_DRONE_BIAS
+            truck_to_drone_prob = 0.38
         if random.random() < truck_to_drone_prob:
             return 1 if len(drone1) <= len(drone2) else 2
         return 0
 
-    # Drone source: usually try truck, sometimes swap drone route
+    # drone source: usually go to truck, sometimes the other drone
     if _SEARCH_PROGRESS < 0.20:
         truck_insert_prob = 0.92
     elif _SEARCH_PROGRESS < 0.50:
@@ -240,10 +185,8 @@ def _select_insert_target(removal_choice, solution):
     return 2 if removal_choice == 1 else 1
 
 
+# truck insertion positions ranked by cheapest insertion first
 def _candidate_truck_insertion_indices(truck, removed_value, exclude_index=None):
-    """
-    Build promising truck insertion positions, ranked by insertion delta.
-    """
     truck_times, _, _, _ = get_operator_context()
     min_idx = 1
     max_idx = len(truck) - 1
@@ -261,7 +204,7 @@ def _candidate_truck_insertion_indices(truck, removed_value, exclude_index=None)
     scored = []
     for idx in candidate_indices:
         delta = _truck_insertion_delta(truck, idx, removed_value, truck_times)
-        scored.append((-delta, idx))  # smaller delta is better
+        scored.append((-delta, idx))  # smaller delta = better, so flip sign
 
     best = _sample_top_indices(scored, _TOP_K_TRUCK_INSERTIONS)
 
@@ -285,12 +228,9 @@ def _choose_truck_insertion_index(truck, removed_value, exclude_index=None):
     return candidates[0]
 
 
+# higher is better. positive slack means the truck has enough
+# time between launch and land for the drone trip
 def _drone_pair_score(node, truck, pair):
-    """
-    Higher is better.
-    Prefer drone pairs where truck has enough time between launch and landing.
-    If matrices unavailable, return 0.
-    """
     truck_times, drone_times, _, _ = get_operator_context()
 
     if pair is None:
@@ -312,9 +252,7 @@ def _drone_pair_score(node, truck, pair):
 
     drone_flight_time = drone_times[launch_node][node] + drone_times[node][land_node]
 
-    # Positive slack is good, negative means likely waiting.
-    slack = truck_segment_time - drone_flight_time
-    return slack
+    return truck_segment_time - drone_flight_time
 
 
 def _candidate_drone_insertion_indices(target_route, preferred_index=None):
@@ -328,6 +266,8 @@ def _candidate_drone_insertion_indices(target_route, preferred_index=None):
     return [preferred_index] + remaining
 
 
+# try a handful of insertion positions in the drone route,
+# keep the best feasible one
 def _choose_best_drone_insertion(
     removed_value,
     truck,
@@ -335,10 +275,6 @@ def _choose_best_drone_insertion(
     preferred_pair=None,
     preferred_index=None,
 ):
-    """
-    Try a few insertion positions into the drone route.
-    Keep the feasible one with the best pair score.
-    """
     candidate_indices = _candidate_drone_insertion_indices(
         target_route,
         preferred_index=preferred_index,
@@ -371,7 +307,7 @@ def _choose_best_drone_insertion(
         if trials >= _MAX_DRONE_INSERTION_TRIALS:
             break
 
-    return best  # (score, insertion_index, pair) or None
+    return best
 
 
 def _attempt_operator_move(current_solution):
@@ -388,7 +324,7 @@ def _attempt_operator_move(current_solution):
     removed_value = None
     original_truck_removal_index = None
 
-    # ----- Remove -----
+    # remove
     if removal_choice == 0:
         if len(truck) <= 2:
             return None
@@ -412,7 +348,7 @@ def _attempt_operator_move(current_solution):
         removed_tuple = source_route.pop(removal_index)
         removed_value = removed_tuple[0]
 
-    # ----- Insert into truck -----
+    # insert into truck
     if insert_choice == 0:
         exclude_index = original_truck_removal_index if removal_choice == 0 else None
         insertion_index = _choose_truck_insertion_index(
@@ -426,14 +362,14 @@ def _attempt_operator_move(current_solution):
         truck.insert(insertion_index, removed_value)
         return new_solution
 
-    # ----- Insert into drone -----
+    # insert into drone
     target_route = new_solution[insert_choice]
 
     preferred_pair = None
     preferred_index = None
     if removed_tuple is not None:
         preferred_pair = (removed_tuple[1], removed_tuple[2])
-        # Try roughly same relative position first if reinserting within drone world
+        # if we're reinserting in the same drone, try the old slot first
         if insert_choice == removal_choice:
             preferred_index = removal_index
 
@@ -478,7 +414,7 @@ def _trip_penalty(trip, truck_route, prefix, drone_times):
         or land_idx >= len(truck_route)
         or launch_idx >= land_idx
     ):
-        # Invalid endpoint mapping: treat as a very poor candidate.
+        # broken endpoints, kill the candidate
         return 1e9
     launch_node = truck_route[launch_idx]
     land_node = truck_route[land_idx]

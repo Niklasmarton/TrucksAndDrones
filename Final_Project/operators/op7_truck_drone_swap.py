@@ -1,26 +1,3 @@
-"""
-op12 — truck↔drone role swap
-
-Simultaneously swaps the roles of one truck customer and one drone customer:
-  - The truck customer becomes a drone customer (given a new launch/land pair).
-  - The drone customer moves to the truck (at its best insertion position).
-
-This is fundamentally different from op1's single-node reinsertion. op1 can
-only move one node at a time (truck→drone OR drone→truck), so reaching a
-configuration where two specific nodes swap roles requires two separate lucky
-op1 moves in sequence. op12 achieves this in a single move, directly
-exploring the truck/drone assignment boundary.
-
-This is the key bottleneck for small instances: the optimal solution requires
-a specific subset of customers to be drone customers, and op12 systematically
-explores that space.
-
-Selection strategy:
-- Prefer truck nodes whose removal saves the most truck time (high-cost nodes).
-- Prefer drone nodes whose current launch/land sync is worst (high wait excess).
-- Try several combinations and return the best feasible result.
-"""
-
 import random
 from pathlib import Path
 import sys
@@ -76,8 +53,8 @@ def _best_truck_insert_delta(node, truck, T):
     return best_delta, best_idx
 
 
+# how out of sync the trip is, lower is better
 def _drone_sync_penalty(node, launch_idx, land_idx, truck, T, D):
-    """How badly this drone trip is out of sync — lower is better."""
     if not (0 <= launch_idx < len(truck) and 0 <= land_idx < len(truck)):
         return float("inf")
     launch_node = truck[launch_idx]
@@ -96,13 +73,14 @@ def _used_endpoints(drone1, drone2):
     return used
 
 
+# truck customers ranked by removal gain
 def _pick_truck_candidate(truck, drone1, drone2, T):
-    """Return a ranked list of (gain, idx) for truck customers."""
     used_ep = _used_endpoints(drone1, drone2)
     scored = []
     for idx in range(1, len(truck) - 1):
         if idx in used_ep:
-            continue  # endpoint nodes can't be removed without breaking drone trips
+            # can't pull a node that another drone trip uses as an endpoint
+            continue
         gain = _truck_removal_gain(truck, idx, T)
         scored.append((gain, idx))
     if not scored:
@@ -111,14 +89,14 @@ def _pick_truck_candidate(truck, drone1, drone2, T):
     return scored
 
 
+# drone trips ranked by sync penalty, worst first
 def _pick_drone_candidate(drone1, drone2, truck, T, D):
-    """Return a ranked list of (penalty, node, route_id, trip_idx)."""
     scored = []
     for route_id, route in ((1, drone1), (2, drone2)):
         for trip_idx, (node, launch_idx, land_idx) in enumerate(route):
             pen = _drone_sync_penalty(node, launch_idx, land_idx, truck, T, D)
             scored.append((pen, node, route_id, trip_idx))
-    scored.sort(reverse=True)  # worst sync first — most likely to benefit from moving
+    scored.sort(reverse=True)
     return scored
 
 
@@ -135,7 +113,7 @@ def _attempt_swap(current_solution, T, D, flight_limit):
     if not truck_candidates or not drone_candidates:
         return None
 
-    # Pick truck node: rank-biased from top candidates.
+    # rank-biased pick from the top truck candidates
     k_t = min(4, len(truck_candidates))
     if random.random() < _EXPLORE_PROB:
         _, truck_idx = random.choice(truck_candidates[:max(k_t, 1)])
@@ -145,7 +123,7 @@ def _attempt_swap(current_solution, T, D, flight_limit):
 
     truck_node = truck[truck_idx]
 
-    # Pick drone node: rank-biased from top candidates.
+    # same for drone candidates
     k_d = min(4, len(drone_candidates))
     if random.random() < _EXPLORE_PROB:
         _, drone_node, route_id, trip_idx = random.choice(drone_candidates[:max(k_d, 1)])
@@ -155,18 +133,16 @@ def _attempt_swap(current_solution, T, D, flight_limit):
             drone_candidates[:k_d], weights=weights, k=1
         )[0]
 
-    # --- Step 1: remove truck_node from truck ---
+    # pull truck_node out
     truck.pop(truck_idx)
 
-    # --- Step 2: insert drone_node into truck (shift indices first) ---
-    # Find best truck insertion for drone_node.
+    # cheapest truck spot for the drone_node we'll move up to the truck
     _, ins_idx = _best_truck_insert_delta(drone_node, truck, T)
     if ins_idx is None:
         return None
     truck.insert(ins_idx, drone_node)
 
-    # Adjust the trip_idx after truck mutation (routes still reference old truck indices).
-    # The drone routes need their indices remapped after the truck pop+insert.
+    # drone routes still reference old truck indices, remap them after pop+insert
     def _remap_idx(idx, pop_idx, insert_idx):
         if idx > pop_idx:
             idx -= 1
@@ -185,16 +161,14 @@ def _attempt_swap(current_solution, T, D, flight_limit):
     drone1 = _remap_route(drone1)
     drone2 = _remap_route(drone2)
 
-    # --- Step 3: remove drone_node from its drone route ---
+    # drop drone_node from its route. find by node id, the sort may have shifted trip_idx
     target_route = drone1 if route_id == 1 else drone2
-    # Find by node identity after remap (trip_idx may have shifted due to sort).
     trip_pos = next((i for i, t in enumerate(target_route) if t[0] == drone_node), None)
     if trip_pos is None:
         return None
     target_route.pop(trip_pos)
 
-    # --- Step 4: try to insert truck_node into a drone route ---
-    # Try the same route first (prefer balance), then the other.
+    # try to put truck_node onto a drone, same route first to keep balance
     other_route = drone2 if route_id == 1 else drone1
     inserted = False
     for candidate_route in (target_route, other_route):
@@ -210,7 +184,6 @@ def _attempt_swap(current_solution, T, D, flight_limit):
             if pair is None:
                 continue
             launch_idx, land_idx = pair
-            # Check endpoint uniqueness.
             used_l = {l for _, l, _ in candidate_route}
             used_r = {r for _, _, r in candidate_route}
             if launch_idx in used_l or land_idx in used_r:
@@ -230,7 +203,7 @@ def _attempt_swap(current_solution, T, D, flight_limit):
     if not inserted:
         return None
 
-    # Verify both routes are valid.
+    # final sanity check on both routes
     if not drone_route_is_feasible(drone1) or not drone_route_is_feasible(drone2):
         return None
     if not _route_endpoint_unique(drone1) or not _route_endpoint_unique(drone2):

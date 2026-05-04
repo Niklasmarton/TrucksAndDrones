@@ -2,17 +2,11 @@ from collections import Counter
 from typing import List, Tuple, Dict, Any
 
 
+# feasibility checker for truck and drone solutions.
+# this version stores the problem instance (n_nodes, n_drones, depot_index,
+# drone_times, flight_range) internally instead of leaning on an outside object.
+# convention: part2/part3/part4 use -1 between drones (in place of "X").
 class SolutionFeasibility:
-    """
-    Feasibility checker for truck–drone solutions.
-
-    This version is fully self-contained: it stores the problem instance
-    (n_nodes, n_drones, depot_index, drone_times, flight_range) internally
-    instead of relying on an external solver object.
-
-    Separator convention:
-      - part2 / part3 / part4 use -1 as separator between drones (replaces "X").
-    """
 
     def __init__(
         self,
@@ -31,13 +25,11 @@ class SolutionFeasibility:
                                                                             
                                            
                                                                             
+    # truck route feasibility:
+    #   1) truck must start and end at the depot
+    #   2) all nodes in part1 must be valid (0..n_nodes-1)
+    #   3) no extra depot visits in the middle
     def is_truck_route_feasible(self, solution: Dict[str, Any]) -> bool:
-        """
-        Check truck-route feasibility:
-        1) Truck must start and stop at depot.
-        2) All nodes in part1 must be valid (0..n_nodes-1).
-        3) No extra depot visits in the middle of the route.
-        """
         part1 = solution.get("part1", [])
         if not part1 or len(part1) < 2:
             return False
@@ -63,12 +55,10 @@ class SolutionFeasibility:
                                                                             
                                                                           
                                                                             
+    # solution must be complete and each customer served exactly once:
+    #  - customers 1..n_nodes-1 appear exactly once across truck (part1) and drones (part2)
+    #  - depot (0) must NOT appear in part2
     def is_complete_solution(self, solution: Dict[str, Any]) -> bool:
-        """
-        Check that the solution is complete and each customer is served exactly once:
-        - All customers 1..n_nodes-1 appear exactly once across truck (part1) and drones (part2).
-        - Depot (0) must NOT appear in part2.
-        """
         part1 = solution.get("part1", [])
         part2 = solution.get("part2", [])
         part3 = solution.get("part3", [])
@@ -107,15 +97,12 @@ class SolutionFeasibility:
                                                                             
                                            
                                                                             
+    # consistency check for part2 (customers + -1), part3 (launch cells), part4 (reconvene cells).
+    # ensures:
+    #  - get_trips_per_drone() can be computed without ValueError
+    #  - every non-separator launch/reconvene cell is a valid part1 index, with launch < reconvene
+    #  - separator counts in part3/part4 are either 0 or equal to the count in part2
     def are_parts_consistent(self, solution: Dict[str, Any]) -> bool:
-        """
-        Consistency check for part2 (customers + -1), part3 (launch cells), part4 (reconvene cells).
-
-        Ensures:
-        - get_trips_per_drone() can be computed without ValueError.
-        - Each non-separator launch/reconvene cell is an int, valid in part1, and launch < reconvene.
-        - Separator counts in part3/part4 are either 0 or equal to the number of separators in part2.
-        """
         part1 = solution.get("part1", [])
         part2 = solution.get("part2", [])
         part3 = solution.get("part3", [])
@@ -178,12 +165,11 @@ class SolutionFeasibility:
                                                                             
                    
                                                                             
+    # cell numbers are 1-based
     def is_valid_cell(self, cell: int, part1: List[int]) -> bool:
-        """Check if cell number is valid (1-based indexing)."""
         return 1 <= cell <= len(part1)
 
     def get_customer_from_cell(self, cell: int, part1: List[int]) -> int:
-        """Get customer from cell number (1-based indexing)."""
         if not self.is_valid_cell(cell, part1):
             return -1
         return part1[cell - 1]
@@ -191,11 +177,9 @@ class SolutionFeasibility:
                                                                             
                                              
                                                                             
+    # trips per drone as lists of (launch_cell, reconvene_cell) tuples.
+    # tolerates -1 separators in part2 and -1 entries in part3/part4.
     def get_trips_per_drone(self, solution: Dict[str, Any]) -> List[List[Tuple[int, int]]]:
-        """
-        Return trips per drone as lists of (launch_cell, reconvene_cell) tuples.
-        Robust to -1 separators in part2 and -1 entries in part3/part4.
-        """
         part2 = solution.get("part2", [])
         part3 = solution.get("part3", [])
         part4 = solution.get("part4", [])
@@ -245,14 +229,9 @@ class SolutionFeasibility:
                                                                             
                                                  
                                                                             
+    # decode customers per drone from part2 using -1 as the separator.
+    # e.g. part2 = [9, 4, -1, 2, 10, 7] with n_drones=2 -> [[9, 4], [2, 10, 7]]
     def get_drone_routes_from_parts(self, solution: Dict[str, Any]) -> List[List[int]]:
-        """
-        Decode customers per drone from part2, using -1 as separator.
-        Example:
-            part2 = [9, 4, -1, 2, 10, 7]
-            n_drones = 2
-            -> [[9, 4], [2, 10, 7]]
-        """
         part2 = solution.get("part2", [])
         routes: List[List[int]] = [[] for _ in range(self.n_drones)]
         drone_idx = 0
@@ -270,6 +249,7 @@ class SolutionFeasibility:
                                                                             
                                    
                                                                             
+    # is the drone trip feasible, with correct per-UAV sequencing
     def is_feasible_drone_trip(
         self,
         customer: int,
@@ -278,7 +258,6 @@ class SolutionFeasibility:
         drone_route_idx: int,
         solution: Dict[str, Any],
     ) -> bool:
-        """Check if drone trip is feasible with correct per-UAV sequencing."""
         part1 = solution["part1"]
 
                           
@@ -306,10 +285,8 @@ class SolutionFeasibility:
                                                                             
                                                              
                                                                             
+    # every drone trip encoded in (part2, part3, part4) must be feasible
     def are_all_drone_trips_feasible(self, solution: Dict[str, Any]) -> bool:
-        """
-        Check that **all** drone trips encoded in (part2, part3, part4) are feasible.
-        """
         trips_per_drone = self.get_trips_per_drone(solution)
 
                                                                       
@@ -362,16 +339,12 @@ class SolutionFeasibility:
                                                                             
                               
                                                                             
+    # global feasibility check for any solution. all four must hold:
+    #  1) truck route feasible (start/end at depot, valid nodes, no stray depots)
+    #  2) complete: every customer served exactly once across truck+drone
+    #  3) part2/part3/part4 consistent (separators, lengths, valid cells, launch<reconvene)
+    #  4) every drone trip is within range and well-sequenced
     def is_solution_feasible(self, solution: Dict[str, Any]) -> bool:
-        """
-        Global feasibility check for any solution.
-
-        Conditions:
-        1) Truck route feasible (start/stop at depot, valid nodes, no stray depots).
-        2) Complete solution: all customers present, each served exactly once (truck+drone).
-        3) part2/part3/part4 consistent (separators, lengths, valid cells, launch<reconvene).
-        4) All drone trips feasible w.r.t. range and sequencing.
-        """
         if not self.is_truck_route_feasible(solution):
             return False
 

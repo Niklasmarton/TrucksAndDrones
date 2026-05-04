@@ -2,14 +2,12 @@ from typing import Dict, Any
 
 
 class CalCulateTotalArrivalTime:
+    # objective for STRPD with full truck/drone synchronisation.
+    # each drone has its own availability timeline, it can't start a new
+    # mission before:
+    #  - the truck has arrived at the launch node, AND
+    #  - the drone has returned from its previous mission.
     def calculate_total_waiting_time(self, solution: Dict[str, Any]) -> float:
-        """
-        Iteratively compute total arrival time (objective) for STRPD with full truck–drone synchronization.
-        Each drone has its own availability timeline — it cannot start a new mission before:
-        - the truck arrives at the launch node, AND
-        - the drone is available from its previous return.
-        """
-        
         feas = True
 
         truck_route = solution["part1"]
